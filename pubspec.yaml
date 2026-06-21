@@ -1,0 +1,48 @@
+name: tchipa
+description: "Tchipa — Virtual Visa Card wallet (USDT on Polygon)"
+publish_to: 'none'
+version: 3.0.0+3
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: ^1.1.0
+  qr_flutter: ^4.1.0
+  share_plus: ^7.1.0
+  path_provider: ^2.1.1
+  screenshot: ^3.0.0
+  cupertino_icons: ^1.0.2
+  url_launcher: ^6.2.1
+  cached_network_image: ^3.3.1
+  shimmer: ^3.0.0
+  flutter_animate: ^4.3.0
+  lottie: ^3.0.0
+  image_picker: ^1.0.7
+  shared_preferences: ^2.3.0
+  webview_flutter: ^4.4.0
+  local_auth: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/tchipa_logo.png"
+  adaptive_icon_background: "#0D1117"
+  adaptive_icon_foreground: "assets/tchipa_logo.png"
+  min_sdk_android: 21
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/

@@ -1,0 +1,33 @@
+name: Build & Deploy PWA
+
+# Builds the Flutter web PWA (iPhone copy of the Tchipa app) on GitHub —
+# this is a standalone repo; it never touches the Android APK pipeline.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+
+      - run: flutter pub get
+
+      # Project Pages site lives under /tchipa-pwa/, so the base href must match.
+      - run: flutter build web --release --base-href /tchipa-pwa/
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
