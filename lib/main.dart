@@ -6351,7 +6351,6 @@ class CardWebViewScreen extends StatefulWidget {
 
 class _CardWebViewScreenState extends State<CardWebViewScreen> {
   late final WebViewController _controller;
-  bool _loading = true;
   bool _extracted = false;
   bool _showFallback = false; // true only if extraction failed after timeout
 
@@ -6506,9 +6505,7 @@ class _CardWebViewScreenState extends State<CardWebViewScreen> {
         } catch (_) {}
       })
       ..setNavigationDelegate(NavigationDelegate(
-        onPageStarted: (_) => setState(() => _loading = true),
         onPageFinished: (_) {
-          setState(() => _loading = false);
           if (widget.onCardData != null) {
             _controller.runJavaScript(_kExtractJs);
           }
