@@ -4,305 +4,22 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:shimmer/shimmer.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:local_auth/local_auth.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 
 // ============================================
 // CONFIGURATION
 // ============================================
 const String kVpsBase       = 'https://api.tchipa.co.uk';
-const double kExchangeRate  = 242.0;
-const double kActivationFee = 7.0;
 const String kAgentTelegram = 'https://t.me/c/3983752002/1';
+const double kExchangeRate  = 242.0;
 
-// ============================================
-// VCC CARD MODEL
-// ============================================
-class VccCard {
-  final String? cardId;
-  final String? cardNumber;
-  final String? expiry;
-  final String? cvv;
-  final String? holderName;
-  final double balance;
-  final bool isActivated;
-  final String? redeemId;
-  final String? redeemLink;
-
-  const VccCard({
-    this.cardId,
-    this.cardNumber,
-    this.expiry,
-    this.cvv,
-    this.holderName,
-    this.balance = 0.0,
-    this.isActivated = false,
-    this.redeemId,
-    this.redeemLink,
-  });
-
-  bool get hasCard =>
-      (cardNumber != null && cardNumber!.isNotEmpty) || redeemLink != null;
-
-  String get maskedNumber {
-    if (cardNumber == null || cardNumber!.isEmpty) return '•••• •••• •••• ••••';
-    final n = cardNumber!.replaceAll(RegExp(r'[\s\-]'), '');
-    if (n.length != 16) return cardNumber!;
-    return '•••• •••• •••• ${n.substring(12)}';
-  }
-
-  String get formattedNumber {
-    if (cardNumber == null || cardNumber!.isEmpty) return '•••• •••• •••• ••••';
-    final n = cardNumber!.replaceAll(RegExp(r'[\s\-]'), '');
-    if (n.length != 16) return cardNumber!;
-    return '${n.substring(0, 4)} ${n.substring(4, 8)} '
-        '${n.substring(8, 12)} ${n.substring(12)}';
-  }
-
-  Map<String, dynamic> toJson() => {
-        'cardId': cardId,
-        'cardNumber': cardNumber,
-        'expiry': expiry,
-        'cvv': cvv,
-        'holderName': holderName,
-        'balance': balance,
-        'isActivated': isActivated,
-        'redeemId': redeemId,
-        'redeemLink': redeemLink,
-      };
-
-  factory VccCard.fromJson(Map<String, dynamic> j) => VccCard(
-        cardId: j['cardId']?.toString() ??
-            j['card_id']?.toString() ??
-            j['id']?.toString(),
-        cardNumber: j['cardNumber']?.toString() ??
-            j['card_number']?.toString() ??
-            j['number']?.toString(),
-        expiry: j['expiry']?.toString() ??
-            j['expiration']?.toString() ??
-            j['exp']?.toString(),
-        cvv: j['cvv']?.toString() ?? j['cvc']?.toString(),
-        holderName: j['holderName']?.toString() ??
-            j['holder_name']?.toString() ??
-            j['name']?.toString(),
-        balance: (j['balance'] as num?)?.toDouble() ?? 0.0,
-        isActivated: j['isActivated'] as bool? ??
-            j['is_activated'] as bool? ??
-            false,
-        redeemId: j['redeemId']?.toString(),
-        redeemLink: j['redeemLink']?.toString(),
-      );
-
-  VccCard copyWith({
-    String? cardId,
-    String? cardNumber,
-    String? expiry,
-    String? cvv,
-    String? holderName,
-    double? balance,
-    bool? isActivated,
-    String? redeemId,
-    String? redeemLink,
-  }) =>
-      VccCard(
-        cardId: cardId ?? this.cardId,
-        cardNumber: cardNumber ?? this.cardNumber,
-        expiry: expiry ?? this.expiry,
-        cvv: cvv ?? this.cvv,
-        holderName: holderName ?? this.holderName,
-        balance: balance ?? this.balance,
-        isActivated: isActivated ?? this.isActivated,
-        redeemId: redeemId ?? this.redeemId,
-        redeemLink: redeemLink ?? this.redeemLink,
-      );
-
-  static Future<VccCard?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('vcc_card');
-    if (raw == null) return null;
-    try {
-      return VccCard.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> save() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('vcc_card', jsonEncode(toJson()));
-  }
-
-  static Future<void> remove() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('vcc_card');
-  }
-}
-
-// ============================================
-// VCC ORDER (pending crypto payment)
-// ============================================
-class VccOrder {
-  // For self-serve: the redeem_id returned by PayGate, used to poll
-  // /paygate/check-status. For agent flow: empty — the agent app must use
-  // agentOrderToken instead (backend deliberately hides the redeem_id from
-  // agents).
-  final String redeemId;
-  final String cryptoAddress;
-  final String amountUsdt;
-  final String? qrCodeBase64;
-  final double cardValue;
-  final String cardType;
-  // Agent-flow only: opaque UUID the agent uses to poll order status without
-  // ever learning the underlying redeem_id.
-  final String? agentOrderToken;
-  // Agent-flow only: 4-digit secret returned by the backend on creation.
-  // Agent must relay it out-of-band (Telegram, SMS, voice) so the user's
-  // app can unlock the redeem link via /cards/claim-with-code.
-  final String? claimCode;
-
-  const VccOrder({
-    required this.redeemId,
-    required this.cryptoAddress,
-    required this.amountUsdt,
-    required this.cardValue,
-    required this.cardType,
-    this.qrCodeBase64,
-    this.agentOrderToken,
-    this.claimCode,
-  });
-
-  factory VccOrder.fromJson(Map<String, dynamic> j) => VccOrder(
-        redeemId:        j['redeemId']?.toString() ?? '',
-        cryptoAddress:   j['cryptoAddress']?.toString() ?? '',
-        amountUsdt:      j['amountUsdt']?.toString() ?? '0',
-        cardValue:       (j['cardValue'] as num?)?.toDouble() ?? 0.0,
-        cardType:        j['cardType']?.toString() ?? 'mastercard',
-        qrCodeBase64:    j['qrCode']?.toString(),
-        agentOrderToken: j['agentOrderToken']?.toString(),
-        claimCode:       j['claimCode']?.toString(),
-      );
-
-  Map<String, dynamic> toJson() => {
-        'redeemId':        redeemId,
-        'cryptoAddress':   cryptoAddress,
-        'amountUsdt':      amountUsdt,
-        'cardValue':       cardValue,
-        'cardType':        cardType,
-        'qrCode':          qrCodeBase64,
-        'agentOrderToken': agentOrderToken,
-        'claimCode':       claimCode,
-      };
-
-  // Pending order persistence — one slot per flow ('activation'|'recharge')
-  // to prevent the duplicate-redeem_id bug: opening the sheet again restores
-  // the existing order instead of creating a new PayGate redeem_id that the
-  // app would then poll while the actual payment lives under the old one.
-  static const _kPendingPrefix    = 'pending_vcc_';
-  static const _kPendingExpiryHrs = 24;
-
-  static String _key(String flow) => '$_kPendingPrefix$flow';
-
-  Future<void> savePending(String flow) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key(flow), jsonEncode({
-      ...toJson(),
-      'createdAt': DateTime.now().toIso8601String(),
-    }));
-  }
-
-  static Future<VccOrder?> loadPending(String flow) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key(flow));
-    if (raw == null) return null;
-    try {
-      final j = jsonDecode(raw) as Map<String, dynamic>;
-      final created = DateTime.tryParse(j['createdAt']?.toString() ?? '');
-      if (created != null &&
-          DateTime.now().difference(created).inHours > _kPendingExpiryHrs) {
-        await clearPending(flow);
-        return null;
-      }
-      return VccOrder.fromJson(j);
-    } catch (_) {
-      await clearPending(flow);
-      return null;
-    }
-  }
-
-  static Future<void> clearPending(String flow) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key(flow));
-  }
-}
-
-// ============================================
-// TRANSACTION MODEL
-// ============================================
-class VccTx {
-  final String type;
-  final double amount;
-  final String label;
-  final DateTime date;
-  final bool isDebit;
-
-  const VccTx({
-    required this.type,
-    required this.amount,
-    required this.label,
-    required this.date,
-    this.isDebit = false,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'type': type,
-        'amount': amount,
-        'label': label,
-        'date': date.toIso8601String(),
-        'isDebit': isDebit,
-      };
-
-  factory VccTx.fromJson(Map<String, dynamic> j) => VccTx(
-        type: j['type'] as String? ?? 'payment',
-        amount: (j['amount'] as num?)?.toDouble() ?? 0.0,
-        label: j['label'] as String? ?? '',
-        date: DateTime.tryParse(j['date'] as String? ?? '') ??
-            DateTime.now(),
-        isDebit: j['isDebit'] as bool? ?? false,
-      );
-
-  static Future<List<VccTx>> loadAll() async {
-    final prefs = await SharedPreferences.getInstance();
-    return (prefs.getStringList('vcc_txs') ?? [])
-        .map((s) {
-          try {
-            return VccTx.fromJson(
-                jsonDecode(s) as Map<String, dynamic>);
-          } catch (_) {
-            return null;
-          }
-        })
-        .whereType<VccTx>()
-        .toList();
-  }
-
-  static Future<void> add(VccTx tx) async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('vcc_txs') ?? [];
-    list.insert(0, jsonEncode(tx.toJson()));
-    await prefs.setStringList('vcc_txs', list.take(100).toList());
-  }
-}
-
-// ============================================
-// USER PROFILE
-// ============================================
 class UserProfile {
   static String name = '';
   static String phone = '';
@@ -349,7 +66,7 @@ class PinSetup {
     // Reconcile with backend: maybe this device reinstalled and the PIN
     // is already set on this phone server-side.
     try {
-      final status = await PayGateService.authPinStatus(phone);
+      final status = await PinApi.authPinStatus(phone);
       if (status.exists && status.verified) {
         UserProfile.pinSet = true;
         await UserProfile.save();
@@ -368,7 +85,7 @@ class PinSetup {
 
     if (!context.mounted) return false;
     try {
-      await PayGateService.authSetupPin(phone: phone, email: email, pin: pin);
+      await PinApi.authSetupPin(phone: phone, email: email, pin: pin);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -419,7 +136,7 @@ class PinSetup {
           }
           setDlg(() { busy = true; errorMsg = null; });
           try {
-            await PayGateService.authChangePin(phone: phone, oldPin: oldPin, newPin: newPin);
+            await PinApi.authChangePin(phone: phone, oldPin: oldPin, newPin: newPin);
             if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
           } catch (e) {
             setDlg(() { busy = false; errorMsg = e.toString().replaceFirst('Exception: ', ''); });
@@ -536,7 +253,7 @@ class PinSetup {
         Future<void> checkNow() async {
           setDlg(() { busy = true; errorMsg = null; });
           try {
-            final s = await PayGateService.authPinStatus(phone);
+            final s = await PinApi.authPinStatus(phone);
             if (s.exists && s.verified) {
               verified = true;
               if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
@@ -549,7 +266,7 @@ class PinSetup {
         }
         pollTimer ??= Timer.periodic(const Duration(seconds: 4), (_) async {
           try {
-            final s = await PayGateService.authPinStatus(phone);
+            final s = await PinApi.authPinStatus(phone);
             if (s.exists && s.verified) {
               verified = true;
               pollTimer?.cancel();
@@ -616,129 +333,9 @@ class PinSetup {
 }
 
 // ============================================
-// PAYGATE SERVICE
+// PIN API (/auth/*) — PIN du solde Tchipa
 // ============================================
-class PayGateService {
-  static Future<VccOrder> createVccOrder({
-    required double amount,
-    String cardType = 'mastercard',
-    String? holderName,
-    String? phone,
-    String? flow, // 'activation' | 'recharge' — only meaningful when phone is set (agent flow)
-    String? source, // 'self' (user pays own card) | 'agent' (agent issues for a client)
-    String? clientEmail, // agent flow: must match the client's verified email
-  }) async {
-    final resp = await http
-        .post(
-          Uri.parse('$kVpsBase/paygate/create-vcc'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'amount': amount,
-            'cardType': cardType,
-            'holderName': holderName,
-            'phone': phone,
-            if (flow != null) 'flow': flow,
-            if (source != null) 'source': source,
-            if (clientEmail != null) 'clientEmail': clientEmail,
-          }),
-        )
-        .timeout(const Duration(seconds: 35));
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode == 200 || resp.statusCode == 201) {
-      return VccOrder.fromJson(body);
-    }
-    // Backend uses `message` for human-readable details (CLIENT_NO_PIN etc.)
-    final err = body['message']?.toString() ?? body['error']?.toString() ?? 'Erreur PayGate (${resp.statusCode})';
-    throw Exception(err);
-  }
-
-  static Future<Map<String, dynamic>> checkVccStatus(String redeemId) async {
-    final resp = await http
-        .get(Uri.parse(
-            '$kVpsBase/paygate/check-status?redeem_id=${Uri.encodeComponent(redeemId)}'))
-        .timeout(const Duration(seconds: 20));
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode == 200) return body;
-    throw Exception(body['error'] ?? 'Erreur statut (${resp.statusCode})');
-  }
-
-  // Agent-side: coarse state only, NO redeem_link (anti-card-theft). Uses
-  // an opaque token rather than redeem_id — the agent never learns the
-  // underlying redeem_id, so they can't bypass the gate by hitting
-  // /paygate/check-status directly.
-  // Returns: { state: 'pending'|'paid'|'completed', isPaid, isReady, delivered }
-  static Future<Map<String, dynamic>> checkAgentOrderStatus(String token) async {
-    final resp = await http
-        .get(Uri.parse(
-            '$kVpsBase/agent/order-status?token=${Uri.encodeComponent(token)}'))
-        .timeout(const Duration(seconds: 20));
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode == 200) return body;
-    throw Exception(body['error'] ?? 'Erreur statut (${resp.statusCode})');
-  }
-
-  // Client-side: discover any cards issued for this phone by an agent.
-  static Future<List<Map<String, dynamic>>> fetchCardsForPhone(String phone) async {
-    final resp = await http
-        .get(Uri.parse('$kVpsBase/cards/for-phone/${Uri.encodeComponent(phone)}'))
-        .timeout(const Duration(seconds: 30));
-    if (resp.statusCode != 200) {
-      throw Exception('fetchCardsForPhone failed (${resp.statusCode})');
-    }
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    final list = (body['cards'] as List? ?? [])
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList();
-    return list;
-  }
-
-  // Client-side: unlock the redeem link for a code-gated agent card.
-  // Returns (redeemLink, redeemId) on success — the redeemId is needed so the
-  // client can later mark the card as delivered. Throws on bad code / lockout
-  // / not-ready with a human-readable French error from the backend.
-  static Future<({String redeemLink, String redeemId})> claimCardWithCode({
-    required String phone,
-    required String cardToken,
-    required String code,
-  }) async {
-    final resp = await http
-        .post(
-          Uri.parse('$kVpsBase/cards/claim-with-code'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'phone': phone,
-            'card_token': cardToken,
-            'code': code,
-          }),
-        )
-        .timeout(const Duration(seconds: 20));
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode == 200) {
-      final link = body['redeemLink']?.toString();
-      final rid  = body['redeemId']?.toString();
-      if (link == null || link.isEmpty || rid == null || rid.isEmpty) {
-        throw Exception('Lien de carte indisponible');
-      }
-      return (redeemLink: link, redeemId: rid);
-    }
-    throw Exception(body['error']?.toString() ?? 'Erreur (${resp.statusCode})');
-  }
-
-  static Future<void> markCardDelivered(String redeemId) async {
-    try {
-      await http
-          .post(Uri.parse('$kVpsBase/cards/mark-delivered'),
-              headers: {'Content-Type': 'application/json'},
-              body: jsonEncode({'redeem_id': redeemId}))
-          .timeout(const Duration(seconds: 10));
-    } catch (_) {
-      // Non-fatal: a missed mark just means the client may re-fetch the same
-      // card on the next poll. Local dedup by redeemId catches it.
-    }
-  }
-
-  static Future<double> fetchBalance(String cardId) async => 0.0;
-
+class PinApi {
   // ----- /auth/* — PIN setup + email magic-link -----
 
   // Triggers a magic-link email. The backend stores the PIN hash immediately
@@ -798,172 +395,8 @@ class PayGateService {
     if (resp.statusCode == 200) return;
     throw Exception(body['error']?.toString() ?? 'Erreur changement PIN (${resp.statusCode})');
   }
-
-  // Client-side: unlock a PIN-gated card. PIN is the client's own secret,
-  // never seen by the agent.
-  static Future<({String redeemLink, String redeemId})> claimCardWithPin({
-    required String phone,
-    required String cardToken,
-    required String pin,
-  }) async {
-    final resp = await http
-        .post(
-          Uri.parse('$kVpsBase/cards/claim-with-pin'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'phone': phone, 'card_token': cardToken, 'pin': pin}),
-        )
-        .timeout(const Duration(seconds: 20));
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode == 200) {
-      final link = body['redeemLink']?.toString();
-      final rid  = body['redeemId']?.toString();
-      if (link == null || link.isEmpty || rid == null || rid.isEmpty) {
-        throw Exception('Lien de carte indisponible');
-      }
-      return (redeemLink: link, redeemId: rid);
-    }
-    throw Exception(body['error']?.toString() ?? 'Erreur (${resp.statusCode})');
-  }
 }
 
-// ============================================
-// AGENT PIN (configurable, persisted)
-// ============================================
-class AgentPin {
-  static const _kKey = 'agent_pin';
-  static const _kDefault = '1234';
-
-  static Future<String> get() async {
-    final p = await SharedPreferences.getInstance();
-    return p.getString(_kKey) ?? _kDefault;
-  }
-
-  static Future<bool> isDefault() async => (await get()) == _kDefault;
-
-  static Future<void> set(String pin) async {
-    if (pin.length != 4 || !RegExp(r'^\d{4}$').hasMatch(pin)) {
-      throw Exception('Le PIN doit faire 4 chiffres');
-    }
-    final p = await SharedPreferences.getInstance();
-    await p.setString(_kKey, pin);
-  }
-}
-
-// ============================================
-// AGENT ORDER (in-progress order tracked by agent)
-// ============================================
-enum AgentOrderState { pending, paid, completed }
-
-class AgentOrder {
-  // Opaque token the backend issues. Replaces redeem_id in the agent surface
-  // so the agent cannot bypass /cards/claim-with-code by manually hitting
-  // /paygate/check-status with the redeem_id (which they no longer ever see).
-  final String agentOrderToken;
-  final String phone;
-  final String holderName;
-  final double amountUsd;
-  final String flow; // 'activation' | 'recharge'
-  final String cryptoAddress;
-  final String amountUsdt;
-  final DateTime createdAt;
-  final AgentOrderState state;
-  // 4-digit unlock code the agent must share with the user out-of-band.
-  // Persisted locally so the agent can re-read it after restart.
-  final String? claimCode;
-
-  const AgentOrder({
-    required this.agentOrderToken,
-    required this.phone,
-    required this.holderName,
-    required this.amountUsd,
-    required this.flow,
-    required this.cryptoAddress,
-    required this.amountUsdt,
-    required this.createdAt,
-    this.state = AgentOrderState.pending,
-    this.claimCode,
-  });
-
-  AgentOrder copyWith({AgentOrderState? state}) => AgentOrder(
-        agentOrderToken: agentOrderToken,
-        phone: phone,
-        holderName: holderName,
-        amountUsd: amountUsd,
-        flow: flow,
-        cryptoAddress: cryptoAddress,
-        amountUsdt: amountUsdt,
-        createdAt: createdAt,
-        state: state ?? this.state,
-        claimCode: claimCode,
-      );
-
-  Map<String, dynamic> toJson() => {
-        'agentOrderToken': agentOrderToken,
-        'phone': phone,
-        'holderName': holderName,
-        'amountUsd': amountUsd,
-        'flow': flow,
-        'cryptoAddress': cryptoAddress,
-        'amountUsdt': amountUsdt,
-        'createdAt': createdAt.toIso8601String(),
-        'state': state.name,
-        'claimCode': claimCode,
-      };
-
-  factory AgentOrder.fromJson(Map<String, dynamic> j) => AgentOrder(
-        agentOrderToken: j['agentOrderToken']?.toString() ?? '',
-        phone: j['phone']?.toString() ?? '',
-        holderName: j['holderName']?.toString() ?? '',
-        amountUsd: (j['amountUsd'] as num?)?.toDouble() ?? 0.0,
-        flow: j['flow']?.toString() ?? 'activation',
-        cryptoAddress: j['cryptoAddress']?.toString() ?? '',
-        amountUsdt: j['amountUsdt']?.toString() ?? '0',
-        createdAt: DateTime.tryParse(j['createdAt']?.toString() ?? '') ??
-            DateTime.now(),
-        state: AgentOrderState.values.firstWhere(
-          (e) => e.name == (j['state']?.toString() ?? 'pending'),
-          orElse: () => AgentOrderState.pending,
-        ),
-        claimCode: j['claimCode']?.toString(),
-      );
-
-  static const _kKey = 'agent_current_order';
-  static const _kExpiryHrs = 48;
-
-  Future<void> save() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(_kKey, jsonEncode(toJson()));
-  }
-
-  static Future<AgentOrder?> load() async {
-    final p = await SharedPreferences.getInstance();
-    final raw = p.getString(_kKey);
-    if (raw == null) return null;
-    try {
-      final order = AgentOrder.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-      if (DateTime.now().difference(order.createdAt).inHours > _kExpiryHrs) {
-        await clear();
-        return null;
-      }
-      return order;
-    } catch (_) {
-      await clear();
-      return null;
-    }
-  }
-
-  static Future<void> clear() async {
-    final p = await SharedPreferences.getInstance();
-    await p.remove(_kKey);
-  }
-}
-
-// ============================================
-// MAIN
-// ============================================
-// ============================================
-// APP SETTINGS (theme + language)
-// ============================================
 final ValueNotifier<bool>   darkModeNotifier = ValueNotifier(true);
 final ValueNotifier<String> langNotifier     = ValueNotifier('fr');
 
@@ -1257,8 +690,6 @@ class AppLock {
   }
 
   static Future<bool> authenticate(BuildContext context) async {
-    // Web (iPhone PWA) has no local_auth plugin — fall back to the PIN flow.
-    if (kIsWeb) return true;
     final auth = LocalAuthentication();
     try {
       final available = await auth.canCheckBiometrics || await auth.isDeviceSupported();
@@ -1378,6 +809,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await UserProfile.load();
   await AppSettings.load();
+  await ShopApi.load();
+  await Cart.load();
   runApp(const TchipaApp());
 }
 
@@ -1665,9 +1098,11 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _idx = 0;
+  // Boutique first: PayGate/Swype cards are gone (2026-09), the shop is the product.
   static const _screens = [
-    HomeScreen(),
-    TransactionsScreen(),
+    ShopScreen(),
+    WalletScreen(),
+    OrdersScreen(),
     ProfileScreen(),
   ];
 
@@ -1676,7 +1111,7 @@ class _MainScreenState extends State<MainScreen> {
     super.initState();
     if (UserProfile.isEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        setState(() => _idx = 2);
+        setState(() => _idx = 3);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Row(children: [
             const Icon(Icons.person_outline, color: Color(0xFF00D4FF)),
@@ -1721,9 +1156,10 @@ class _MainScreenState extends State<MainScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  _NavPill(icon: Icons.credit_card_rounded, label: 'Carte',     sel: _idx == 0, onTap: () => setState(() => _idx = 0)),
-                  _NavPill(icon: Icons.receipt_long_rounded, label: 'Historique', sel: _idx == 1, onTap: () => setState(() => _idx = 1)),
-                  _NavPill(icon: Icons.person_rounded,       label: 'Profil',    sel: _idx == 2, onTap: () => setState(() => _idx = 2)),
+                  _NavPill(icon: Icons.storefront_rounded,   label: 'Boutique',  sel: _idx == 0, onTap: () => setState(() => _idx = 0)),
+                  _NavPill(icon: Icons.account_balance_wallet_rounded, label: 'Solde', sel: _idx == 1, onTap: () => setState(() => _idx = 1)),
+                  _NavPill(icon: Icons.local_shipping_rounded, label: 'Commandes', sel: _idx == 2, onTap: () => setState(() => _idx = 2)),
+                  _NavPill(icon: Icons.person_rounded,       label: 'Profil',    sel: _idx == 3, onTap: () => setState(() => _idx = 3)),
                 ],
               ),
             ),
@@ -1776,3042 +1212,6 @@ class _NavPill extends StatelessWidget {
   }
 }
 
-// ============================================
-// HOME SCREEN
-// ============================================
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen>
-    with TickerProviderStateMixin {
-  VccCard? _card;
-  bool _loading = true;
-  bool _showFull = false;
-  bool _refreshing = false;
-  // Card surfaced by an agent for this client's phone, ready to be redeemed.
-  // Kept distinct from _card so the user explicitly opts in (we never auto-overwrite
-  // an existing card on the device).
-  Map<String, dynamic>? _pendingAgentCard;
-  bool _pollingAgent = false;
-  List<Map<String, dynamic>> _rates = [];
-  String? _ratesDate;
-
-  late AnimationController _shimmerCtrl;
-  late AnimationController _glowCtrl;
-  late Animation<double> _glowAnim;
-  late AnimationController _bgCtrl;
-  // Subtle continuous spin for the Tchipa "T" mark in the app bar — slow
-  // enough to feel alive without distracting from the UI.
-  late AnimationController _logoSpinCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _shimmerCtrl = AnimationController(
-        vsync: this, duration: const Duration(seconds: 2))
-      ..repeat();
-    _glowCtrl = AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 1400))
-      ..repeat(reverse: true);
-    _glowAnim =
-        CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut);
-    _bgCtrl = AnimationController(
-        vsync: this, duration: const Duration(seconds: 8))
-      ..repeat(reverse: true);
-    _logoSpinCtrl = AnimationController(
-        vsync: this, duration: const Duration(seconds: 16))
-      ..repeat();
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _shimmerCtrl.dispose();
-    _glowCtrl.dispose();
-    _bgCtrl.dispose();
-    _logoSpinCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    final card = await VccCard.load();
-    if (mounted) setState(() { _card = card; _loading = false; });
-    _pollAgentCards();
-    _loadRates();
-  }
-
-  // Parallel-market rates scraped by the backend from squareportsaid.com.
-  // Best-effort: a failure just leaves the rates card hidden.
-  Future<void> _loadRates() async {
-    try {
-      final resp = await http
-          .get(Uri.parse('$kVpsBase/rates'))
-          .timeout(const Duration(seconds: 15));
-      if (resp.statusCode != 200) return;
-      final j = jsonDecode(resp.body) as Map<String, dynamic>;
-      if (!mounted) return;
-      setState(() {
-        _rates = (j['rates'] as List).cast<Map<String, dynamic>>();
-        _ratesDate = j['date'] as String?;
-      });
-    } catch (_) {/* leave the card hidden */}
-  }
-
-  Future<void> _pollAgentCards() async {
-    if (_pollingAgent) return;
-    final phone = UserProfile.phone.trim();
-    if (phone.isEmpty) return;
-    _pollingAgent = true;
-    try {
-      final cards = await PayGateService.fetchCardsForPhone(phone);
-      // Locked cards come back with redeemId=null + cardToken set; unlocked
-      // rows have redeemId set. Filter out the one we've already locally
-      // claimed (matched by redeemId) and surface the next candidate.
-      final localRedeem = _card?.redeemId;
-      final candidate = cards.firstWhere(
-        (c) {
-          final cRedeem = c['redeemId']?.toString();
-          return !(cRedeem != null && localRedeem != null && cRedeem == localRedeem);
-        },
-        orElse: () => <String, dynamic>{},
-      );
-      if (candidate.isNotEmpty && mounted) {
-        setState(() => _pendingAgentCard = candidate);
-      }
-    } catch (_) {
-      // Silent — non-critical background poll.
-    } finally {
-      _pollingAgent = false;
-    }
-  }
-
-  Widget _buildAgentCardBanner() {
-    final c = _pendingAgentCard!;
-    final amt = (c['cardValue'] as num?)?.toStringAsFixed(0) ?? '?';
-    return GestureDetector(
-      onTap: _redeemAgentCard,
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF22D3A1), Color(0xFF0EA47A)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-                color: const Color(0xFF22D3A1).withValues(alpha: 0.35),
-                blurRadius: 18, offset: const Offset(0, 6)),
-          ],
-        ),
-        child: Row(children: [
-          const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 28),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Une carte de \$$amt vous attend',
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 2),
-              const Text('Émise par un agent. Tapez pour récupérer.',
-                  style: TextStyle(color: Colors.white70, fontSize: 12)),
-            ]),
-          ),
-          const Icon(Icons.chevron_right_rounded, color: Colors.white, size: 26),
-        ]),
-      ),
-    );
-  }
-
-  Future<void> _redeemAgentCard() async {
-    final c = _pendingAgentCard;
-    if (c == null) return;
-    final cardToken    = c['cardToken']?.toString();
-    final holderName   = c['holderName']?.toString() ?? UserProfile.name;
-    final cardValue    = (c['cardValue'] as num?)?.toDouble() ?? 0.0;
-    final requiresPin  = c['requiresPin'] == true;
-    final requiresCode = c['requiresCode'] == true;
-
-    // Locked path: backend hid both redeemLink and redeemId. Two unlock paths:
-    //  - PIN flow (new): /cards/claim-with-pin with the user's own PIN.
-    //  - Code flow (legacy): /cards/claim-with-code with a 4-digit code the
-    //    agent shared out-of-band.
-    String? link     = c['redeemLink']?.toString();
-    String? redeemId = c['redeemId']?.toString();
-
-    if (requiresPin || requiresCode ||
-        link == null || link.isEmpty || redeemId == null || redeemId.isEmpty) {
-      final phone = UserProfile.phone.trim();
-      if (phone.isEmpty || cardToken == null || cardToken.isEmpty) return;
-      final unlocked = requiresPin
-          ? await _promptPinAndFetch(
-              phone: phone, cardToken: cardToken, cardValue: cardValue)
-          : await _promptClaimCodeAndFetch(
-              phone: phone, cardToken: cardToken, cardValue: cardValue);
-      if (unlocked == null) return; // user cancelled or kept failing
-      link = unlocked.redeemLink;
-      redeemId = unlocked.redeemId;
-    }
-
-    final base = VccCard(
-      cardId: redeemId,
-      redeemId: redeemId,
-      redeemLink: link,
-      balance: cardValue,
-      isActivated: true,
-      holderName: holderName,
-    );
-    await base.save();
-    if (mounted) setState(() { _card = base; _pendingAgentCard = null; });
-
-    if (!mounted) return;
-    final unlockedLink = link;
-    final unlockedRedeem = redeemId;
-    Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CardWebViewScreen(
-          url: unlockedLink,
-          title: 'Récupération carte…',
-          onCardData: (number, cvv, expiry) async {
-            final updated = base.copyWith(
-                cardNumber: number, cvv: cvv, expiry: expiry);
-            await updated.save();
-            await PayGateService.markCardDelivered(unlockedRedeem);
-            if (mounted) {
-              Navigator.of(context).pop();
-              setState(() => _card = updated);
-            }
-          },
-        ),
-      ),
-    );
-  }
-
-  // Prompts the user for their own Tchipa PIN (set at install via PinSetup),
-  // exchanges it via /cards/claim-with-pin. PIN is never shared with the
-  // agent, so even a malicious agent who has phone+card_token can't claim.
-  Future<({String redeemLink, String redeemId})?> _promptPinAndFetch({
-    required String phone,
-    required String cardToken,
-    required double cardValue,
-  }) async {
-    final ctrl = TextEditingController();
-    String? errorMsg;
-    bool busy = false;
-    ({String redeemLink, String redeemId})? result;
-
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogCtx) => StatefulBuilder(builder: (dialogCtx, setDlg) {
-        Future<void> submit() async {
-          final pin = ctrl.text.trim();
-          if (!RegExp(r'^\d{4,6}$').hasMatch(pin)) {
-            setDlg(() => errorMsg = 'PIN: 4 à 6 chiffres');
-            return;
-          }
-          setDlg(() { busy = true; errorMsg = null; });
-          try {
-            final unlocked = await PayGateService.claimCardWithPin(
-                phone: phone, cardToken: cardToken, pin: pin);
-            result = unlocked;
-            if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
-          } catch (e) {
-            final msg = e.toString().replaceFirst('Exception: ', '');
-            setDlg(() { busy = false; errorMsg = msg; });
-            if (msg.toLowerCase().contains('trop de tentatives')) {
-              await Future<void>.delayed(const Duration(seconds: 2));
-              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
-            }
-          }
-        }
-        return AlertDialog(
-          backgroundColor: AppColors.surface,
-          title: Text('Récupérer ta carte',
-              style: TextStyle(color: AppColors.label)),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(
-              'Une carte de \$${cardValue.toStringAsFixed(0)} t\'attend. '
-              'Entre ton PIN Tchipa pour la déverrouiller.',
-              style: TextStyle(color: AppColors.sublabel, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              enabled: !busy,
-              keyboardType: TextInputType.number,
-              obscureText: true,
-              textAlign: TextAlign.center,
-              maxLength: 6,
-              style: TextStyle(
-                  color: AppColors.inputFg,
-                  fontSize: 22,
-                  letterSpacing: 8,
-                  fontWeight: FontWeight.bold),
-              decoration: const InputDecoration(
-                counterText: '',
-                hintText: '••••',
-              ),
-              onSubmitted: (_) => submit(),
-            ),
-            if (errorMsg != null) ...[
-              const SizedBox(height: 8),
-              Text(errorMsg!,
-                  style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-            ],
-          ]),
-          actions: [
-            TextButton(
-              onPressed: busy ? null : () => Navigator.of(dialogCtx).pop(),
-              child: const Text('Annuler'),
-            ),
-            ElevatedButton(
-              onPressed: busy ? null : submit,
-              child: busy
-                  ? const SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Valider'),
-            ),
-          ],
-        );
-      }),
-    );
-    return result;
-  }
-
-  // Prompts the user for the 4-digit unlock code the agent shared
-  // (Telegram/SMS), exchanges it via /cards/claim-with-code, and returns the
-  // redeem link. Returns null if the user cancels. Loops on wrong code until
-  // backend lockout (then closes with the lockout error).
-  Future<({String redeemLink, String redeemId})?> _promptClaimCodeAndFetch({
-    required String phone,
-    required String cardToken,
-    required double cardValue,
-  }) async {
-    final ctrl = TextEditingController();
-    String? errorMsg;
-    bool busy = false;
-    ({String redeemLink, String redeemId})? result;
-
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogCtx) => StatefulBuilder(builder: (dialogCtx, setDlg) {
-        Future<void> submit() async {
-          final code = ctrl.text.trim();
-          if (code.length != 4 || int.tryParse(code) == null) {
-            setDlg(() => errorMsg = 'Code à 4 chiffres requis');
-            return;
-          }
-          setDlg(() { busy = true; errorMsg = null; });
-          try {
-            final unlocked = await PayGateService.claimCardWithCode(
-                phone: phone, cardToken: cardToken, code: code);
-            result = unlocked;
-            if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
-          } catch (e) {
-            final msg = e.toString().replaceFirst('Exception: ', '');
-            setDlg(() { busy = false; errorMsg = msg; });
-            // Backend lockout — no point letting them retry.
-            if (msg.toLowerCase().contains('trop de tentatives')) {
-              await Future<void>.delayed(const Duration(seconds: 2));
-              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
-            }
-          }
-        }
-        return AlertDialog(
-          backgroundColor: AppColors.surface,
-          title: Text('Déverrouiller la carte',
-              style: TextStyle(color: AppColors.label)),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(
-              'Une carte de \$${cardValue.toStringAsFixed(0)} vous attend. '
-              'Entrez le code à 4 chiffres communiqué par votre agent.',
-              style: TextStyle(color: AppColors.sublabel, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              enabled: !busy,
-              keyboardType: TextInputType.number,
-              textAlign: TextAlign.center,
-              maxLength: 4,
-              style: TextStyle(
-                  color: AppColors.inputFg,
-                  fontSize: 22,
-                  letterSpacing: 8,
-                  fontWeight: FontWeight.bold),
-              decoration: const InputDecoration(
-                counterText: '',
-                hintText: '••••',
-              ),
-              onSubmitted: (_) => submit(),
-            ),
-            if (errorMsg != null) ...[
-              const SizedBox(height: 8),
-              Text(errorMsg!,
-                  style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-            ],
-          ]),
-          actions: [
-            TextButton(
-              onPressed: busy ? null : () => Navigator.of(dialogCtx).pop(),
-              child: const Text('Annuler'),
-            ),
-            ElevatedButton(
-              onPressed: busy ? null : submit,
-              child: busy
-                  ? const SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Valider'),
-            ),
-          ],
-        );
-      }),
-    );
-    return result;
-  }
-
-  Future<void> _refreshBalance() async {
-    // PayGate has no balance API for VCCs — their own response says
-    // "Consultez votre lien de carte PayGate pour le solde". The previous
-    // implementation called fetchBalance (hardcoded to 0.0) and wrote 0
-    // back to local storage, wiping the funded amount. We now just point
-    // the user to Swype.
-    _loadRates();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Text('Solde temps réel non disponible. Ouvre le lien Swype pour voir le solde actuel.'),
-      backgroundColor: AppColors.surface,
-      duration: const Duration(seconds: 4),
-    ));
-  }
-
-  void _showErr(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: Colors.redAccent,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12)),
-    ));
-  }
-
-  void _onActivated(VccCard card) {
-    setState(() => _card = card);
-    VccTx.add(VccTx(
-      type: 'activation',
-      amount: kActivationFee,
-      label: 'Activation carte VCC',
-      date: DateTime.now(),
-      isDebit: true,
-    ));
-  }
-
-  void _onRechargeDone(double amount) {
-    _load();
-    VccTx.add(VccTx(
-      type: 'recharge',
-      amount: amount,
-      label: 'Rechargement carte',
-      date: DateTime.now(),
-    ));
-  }
-
-  void _openActivation() {
-    if (UserProfile.isEmpty) {
-      _showErr('Complétez votre profil avant d\'activer');
-      return;
-    }
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _ActivationSheet(
-        onActivated: (card) { Navigator.pop(context); _onActivated(card); },
-      ),
-    );
-  }
-
-  void _openRecharge() {
-    final card = _card;
-    if (card?.isActivated != true) return;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _RechargeSheet(
-        card: card!,
-        onSuccess: (amt) { Navigator.pop(context); _onRechargeDone(amt); },
-      ),
-    );
-  }
-
-  void _openDetails() {
-    final card = _card;
-    if (card?.isActivated != true) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _CardDetailsSheet(card: card!),
-    );
-  }
-
-  void _openCardLink() {
-    final card = _card;
-    final link = card?.redeemLink;
-    if (link == null) return;
-    bool extracted = false;
-    Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CardWebViewScreen(
-          url: link,
-          title: 'Récupération carte…',
-          onCardData: (number, cvv, expiry) async {
-            extracted = true;
-            final updated = card!.copyWith(cardNumber: number, cvv: cvv, expiry: expiry);
-            await updated.save();
-            if (mounted) Navigator.of(context).pop();
-          },
-        ),
-      ),
-    ).then((_) async {
-      if (!extracted || !mounted) return;
-      final latest = await VccCard.load();
-      if (!mounted) return;
-      if (latest != null) setState(() => _card = latest);
-      if (latest?.cardNumber != null) {
-        showModalBottomSheet(
-          context: context,
-          backgroundColor: Colors.transparent,
-          builder: (_) => _CardDetailsSheet(card: latest!),
-        );
-      }
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: Stack(children: [
-        // Animated mesh gradient background
-        AnimatedBuilder(
-          animation: _bgCtrl,
-          builder: (_, __) {
-            final t = _bgCtrl.value;
-            return Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment(-1 + t * 0.6, -1),
-                  end: Alignment(1 - t * 0.4, 1),
-                  colors: AppColors.isDark
-                      ? [
-                          Color.lerp(const Color(0xFF0D1117), const Color(0xFF0A1628), t)!,
-                          Color.lerp(const Color(0xFF0F1923), const Color(0xFF120820), t)!,
-                          Color.lerp(const Color(0xFF0D1117), const Color(0xFF0A1020), t)!,
-                        ]
-                      : [
-                          Color.lerp(const Color(0xFFEEF4FF), const Color(0xFFF5F0FF), t)!,
-                          Color.lerp(const Color(0xFFF0F5FF), const Color(0xFFEFF8FF), t)!,
-                          Color.lerp(const Color(0xFFF5F0FF), const Color(0xFFEEF4FF), t)!,
-                        ],
-                ),
-              ),
-            );
-          },
-        ),
-        // Cyan blob top-right
-        Positioned(
-          top: -80, right: -60,
-          child: AnimatedBuilder(
-            animation: _bgCtrl,
-            builder: (_, __) => Container(
-              width: 320, height: 320,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(colors: [
-                  const Color(0xFF00D4FF).withValues(alpha: (AppColors.isDark ? 0.10 : 0.18) + _bgCtrl.value * 0.06),
-                  Colors.transparent,
-                ]),
-              ),
-            ),
-          ),
-        ),
-        // Purple blob bottom-left
-        Positioned(
-          bottom: 80, left: -80,
-          child: AnimatedBuilder(
-            animation: _bgCtrl,
-            builder: (_, __) => Container(
-              width: 300, height: 300,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(colors: [
-                  const Color(0xFF8B5CF6).withValues(alpha: (AppColors.isDark ? 0.08 : 0.12) + (1 - _bgCtrl.value) * 0.05),
-                  Colors.transparent,
-                ]),
-              ),
-            ),
-          ),
-        ),
-        CustomScrollView(slivers: [
-        SliverAppBar(
-          floating: true,
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          titleSpacing: 16,
-          title: Row(children: [
-            RotationTransition(
-              turns: _logoSpinCtrl,
-              child: Container(
-                width: 44, height: 44,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Color(0x7300D4FF),
-                      blurRadius: 16,
-                      spreadRadius: 1,
-                    ),
-                  ],
-                ),
-                child: Image.asset('assets/tchipa_logo.png', fit: BoxFit.contain),
-              ),
-            ),
-            const SizedBox(width: 12),
-            ShaderMask(
-              shaderCallback: (b) => const LinearGradient(
-                colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-              ).createShader(b),
-              child: const Text('tchipa',
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                    letterSpacing: 4,
-                  )),
-            ),
-          ]),
-          actions: [
-            if (_card?.isActivated == true)
-              IconButton(
-                tooltip: 'Actualiser le solde',
-                onPressed: _refreshing ? null : _refreshBalance,
-                icon: _refreshing
-                    ? const SizedBox(
-                        width: 18, height: 18,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFF00D4FF)))
-                    : const Icon(Icons.refresh_rounded,
-                        color: Color(0xFF00D4FF)),
-              ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        SliverToBoxAdapter(
-          child: _loading
-              ? const _LoadingCard()
-              : Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildSubtitle(),
-                      const SizedBox(height: 16),
-                      if (_pendingAgentCard != null) ...[
-                        _buildAgentCardBanner(),
-                        const SizedBox(height: 14),
-                      ],
-                      _buildCardWidget(),
-                      const SizedBox(height: 24),
-                      _buildActions(),
-                      if (_rates.isNotEmpty) ...[
-                        const SizedBox(height: 32),
-                        _buildRates(),
-                      ],
-                      if (_card?.isActivated == true) ...[
-                        const SizedBox(height: 32),
-                        _buildRecentActivity(),
-                      ],
-                    ],
-                  ),
-                ),
-        ),
-      ]),
-      ]), // close Stack
-    );
-  }
-
-  Widget _buildSubtitle() {
-    final active = _card?.isActivated == true;
-    final name = UserProfile.name.isNotEmpty ? UserProfile.name.split(' ').first : null;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Text(name != null ? 'Bonjour, $name' : 'Bonjour',
-            style: TextStyle(color: AppColors.label, fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-        const Spacer(),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(
-            color: active
-                ? const Color(0xFF00D4FF).withValues(alpha: 0.12)
-                : AppColors.card.withValues(alpha: 0.6),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: active
-                  ? const Color(0xFF00D4FF).withValues(alpha: 0.35)
-                  : AppColors.border,
-            ),
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Container(
-              width: 6, height: 6,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: active ? const Color(0xFF00D4FF) : AppColors.textDim,
-                boxShadow: active ? [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.6), blurRadius: 4)] : null,
-              ),
-            ),
-            const SizedBox(width: 5),
-            Text(active ? 'Active' : 'Inactive',
-                style: TextStyle(
-                    color: active ? const Color(0xFF00D4FF) : AppColors.textDim,
-                    fontSize: 11, fontWeight: FontWeight.w700)),
-          ]),
-        ),
-      ]),
-      const SizedBox(height: 14),
-      if (active) ...[
-        Text('SOLDE DISPONIBLE',
-            style: TextStyle(color: AppColors.textDim, fontSize: 10, letterSpacing: 2.5, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 4),
-        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text('\$', style: TextStyle(color: AppColors.textSub, fontSize: 22, fontWeight: FontWeight.w300, height: 1.6)),
-          const SizedBox(width: 2),
-          Text(_card!.balance.toStringAsFixed(2),
-              style: TextStyle(
-                  color: AppColors.label,
-                  fontSize: 48,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: -2,
-                  height: 1)),
-          const SizedBox(width: 8),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: const Color(0xFF00D4FF).withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.3)),
-              ),
-              child: const Text('USD', style: TextStyle(color: Color(0xFF00D4FF), fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
-            ),
-          ),
-        ]),
-      ] else
-        Text('Activez votre carte pour commencer',
-            style: TextStyle(color: AppColors.textSub, fontSize: 13)),
-    ]);
-  }
-
-  Widget _buildCardWidget() {
-    return GestureDetector(
-      onTap: () {
-        if (_card?.isActivated == true) {
-          setState(() => _showFull = !_showFull);
-          HapticFeedback.lightImpact();
-        }
-      },
-      child: AnimatedBuilder(
-        animation: _shimmerCtrl,
-        builder: (_, __) => _VccCardVisual(
-          card: _card,
-          showFull: _showFull,
-          shimmerPhase: _shimmerCtrl.value,
-          onCardCaptured: () async {
-            final latest = await VccCard.load();
-            if (!mounted) return;
-            if (latest != null) setState(() => _card = latest);
-          },
-        ),
-      ),
-    );
-  }
-
-  static String _fmtRate(dynamic n) {
-    final d = (n as num).toDouble();
-    return d == d.roundToDouble() ? d.toStringAsFixed(0) : d.toString();
-  }
-
-  Widget _buildRates() {
-    final usdt = _rates.firstWhere((r) => r['code'] == 'USDT',
-        orElse: () => const {});
-    final others = _rates.where((r) => r['code'] != 'USDT').toList();
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: AppColors.isDark ? 0.7 : 1),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Text('Taux du Square',
-                style: TextStyle(
-                    color: AppColors.label,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700)),
-            const Spacer(),
-            if (_ratesDate != null)
-              Text(_ratesDate!,
-                  style: TextStyle(color: AppColors.textDim, fontSize: 11)),
-          ]),
-          const SizedBox(height: 14),
-          if (usdt.isNotEmpty) _usdtRateFeature(usdt),
-          if (others.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: others.map(_rateChip).toList(),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Text('Marché parallèle · squareportsaid.com',
-              style: TextStyle(color: AppColors.textDim, fontSize: 10.5)),
-        ],
-      ),
-    );
-  }
-
-  // USDT first and biggest — the currency the wallet pipeline runs on.
-  Widget _usdtRateFeature(Map<String, dynamic> r) {
-    const tether = Color(0xFF26A17B);
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: [
-          tether.withValues(alpha: 0.16),
-          tether.withValues(alpha: 0.04),
-        ]),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: tether.withValues(alpha: 0.35)),
-      ),
-      child: Row(children: [
-        Container(
-          width: 46,
-          height: 46,
-          alignment: Alignment.center,
-          decoration: const BoxDecoration(color: tether, shape: BoxShape.circle),
-          child: const Text('₮',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800)),
-        ),
-        const SizedBox(width: 14),
-        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('USDT',
-              style: TextStyle(
-                  color: AppColors.label,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800)),
-          Text('Tether · DZD',
-              style: TextStyle(color: AppColors.textSub, fontSize: 12)),
-        ]),
-        const Spacer(),
-        Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text(_fmtRate(r['buy']),
-              style: TextStyle(
-                  color: AppColors.label,
-                  fontSize: 30,
-                  fontWeight: FontWeight.w900,
-                  height: 1)),
-          const SizedBox(height: 2),
-          Text('Achat · Vente ${_fmtRate(r['sell'])}',
-              style: TextStyle(color: AppColors.textSub, fontSize: 11.5)),
-        ]),
-      ]),
-    );
-  }
-
-  Widget _rateChip(Map<String, dynamic> r) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.bg.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Text(r['code'] as String,
-            style: TextStyle(
-                color: AppColors.label,
-                fontSize: 13,
-                fontWeight: FontWeight.w700)),
-        const SizedBox(width: 8),
-        Text('${_fmtRate(r['buy'])} / ${_fmtRate(r['sell'])}',
-            style: TextStyle(color: AppColors.textSub, fontSize: 12.5)),
-      ]),
-    );
-  }
-
-  Widget _buildActions() {
-    final active = _card?.isActivated == true;
-
-    if (!active) {
-      return Column(children: [
-        AnimatedBuilder(
-          animation: _glowAnim,
-          builder: (_, child) {
-            final g = _glowAnim.value;
-            return Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF00D4FF)
-                        .withValues(alpha: 0.25 + g * 0.35),
-                    blurRadius: 18 + g * 20,
-                    spreadRadius: g * 4,
-                  ),
-                  BoxShadow(
-                    color: const Color(0xFF8B5CF6)
-                        .withValues(alpha: 0.2 + g * 0.25),
-                    blurRadius: 28 + g * 16,
-                  ),
-                ],
-              ),
-              child: child,
-            );
-          },
-          child: _ActionButton(
-            label: 'Activer ma carte',
-            sublabel: 'Paiement direct USDT · Réseau Polygon',
-            icon: Icons.credit_card_rounded,
-            colors: const [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-            onTap: _openActivation,
-          ),
-        ),
-        const SizedBox(height: 16),
-        _TelegramButton(),
-      ]).animate().fadeIn(duration: 400.ms).slideY(begin: 0.08, end: 0);
-    }
-
-    return Column(children: [
-      _ActionButton(
-        label: 'Recharger',
-        sublabel: 'Créer une nouvelle carte',
-        icon: Icons.add_card_rounded,
-        colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-        onTap: _openRecharge,
-      ),
-      const SizedBox(height: 12),
-      if (_card?.cardNumber == null && _card?.redeemLink != null)
-        _ActionButton(
-          label: 'Récupérer ma carte',
-          sublabel: 'Extraction automatique des détails',
-          icon: Icons.credit_card_rounded,
-          colors: const [Color(0xFF8B5CF6), Color(0xFFEC4899)],
-          onTap: _openCardLink,
-        )
-      else
-        _ActionButton(
-          label: 'Voir les détails',
-          sublabel: 'Numéro · CVV · Expiration',
-          icon: Icons.visibility_rounded,
-          colors: const [Color(0xFF8B5CF6), Color(0xFFEC4899)],
-          onTap: _openDetails,
-        ),
-      const SizedBox(height: 12),
-      _TelegramButton(),
-    ]).animate().fadeIn(duration: 400.ms);
-  }
-
-  Widget _buildRecentActivity() {
-    return FutureBuilder<List<VccTx>>(
-      future: VccTx.loadAll(),
-      builder: (ctx, snap) {
-        final txs = (snap.data ?? []).take(3).toList();
-        if (txs.isEmpty) return const SizedBox.shrink();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('ACTIVITÉ RÉCENTE',
-                style: TextStyle(
-                    color: AppColors.textDim,
-                    fontSize: 11,
-                    letterSpacing: 2,
-                    fontWeight: FontWeight.w600)),
-            const SizedBox(height: 12),
-            ...txs.map((tx) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: _TxRow(tx: tx),
-                )),
-          ],
-        );
-      },
-    );
-  }
-}
-
-// ============================================
-// VCC CARD VISUAL
-// ============================================
-class _VccCardVisual extends StatelessWidget {
-  final VccCard? card;
-  final bool showFull;
-  final double shimmerPhase;
-  // Called after the user captures card data from the embedded WebView
-  // (auto-extracted or via manual entry). The parent uses this to reload
-  // the persisted card and trigger setState.
-  final Future<void> Function()? onCardCaptured;
-
-  const _VccCardVisual({
-    required this.card,
-    required this.showFull,
-    required this.shimmerPhase,
-    this.onCardCaptured,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final active = card?.isActivated == true;
-    String _rawName = card?.holderName?.isNotEmpty == true
-        ? card!.holderName!
-        : UserProfile.name.isNotEmpty
-            ? UserProfile.name
-            : 'NOM COMPLET';
-    // strip email address if accidentally included
-    if (_rawName.contains('@')) _rawName = _rawName.split(RegExp(r'[\s<@]')).first;
-    final holderName = _rawName.toUpperCase();
-
-    return Container(
-      height: 216,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: active
-              ? const [
-                  Color(0xFF1B0B3A),
-                  Color(0xFF0A1F6E),
-                  Color(0xFF003D5C),
-                ]
-              : const [
-                  Color(0xFF1A1A2E),
-                  Color(0xFF16213E),
-                  Color(0xFF0F3460),
-                ],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: active
-                ? const Color(0xFF00D4FF).withValues(alpha: 0.30)
-                : const Color(0xFF0F3460).withValues(alpha: 0.45),
-            blurRadius: 32, offset: const Offset(0, 12),
-          ),
-          BoxShadow(
-            color: const Color(0xFF8B5CF6).withValues(alpha: 0.18),
-            blurRadius: 48, offset: const Offset(0, 18),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(22),
-        child: Stack(children: [
-          // Subtle grid lines
-          Positioned.fill(
-              child: CustomPaint(
-                  painter: _CardGridPainter(active))),
-          // Moving shine (active only)
-          if (active)
-            Positioned.fill(
-                child: CustomPaint(
-                    painter: _ShimmerPainter(shimmerPhase))),
-          // Card content
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment:
-                      MainAxisAlignment.spaceBetween,
-                  children: [
-                    _buildChip(active),
-                    _buildBalance(active),
-                  ],
-                ),
-                const Spacer(),
-                _buildNumberRow(active, context),
-                const SizedBox(height: 16),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                        child: _buildNameExpiry(
-                            active, holderName)),
-                    _buildLogo(active),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          // Tap hint
-          if (active)
-            Positioned(
-              bottom: 6, left: 0, right: 0,
-              child: Center(
-                child: Text(
-                  showFull
-                      ? 'Appuyer pour masquer'
-                      : 'Appuyer pour révéler le numéro',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.25),
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-            ),
-        ]),
-      ),
-    );
-  }
-
-  Widget _buildChip(bool active) {
-    return Container(
-      width: 46, height: 34,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(7),
-        gradient: active
-            ? const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFFFFD700), Color(0xFFB8860B)])
-            : LinearGradient(colors: [
-                Colors.grey.shade700,
-                Colors.grey.shade900,
-              ]),
-      ),
-      child: active
-          ? null
-          : const Center(
-              child: Icon(Icons.lock_outline_rounded,
-                  color: Colors.white30, size: 16)),
-    );
-  }
-
-  Widget _buildBalance(bool active) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-      Text(
-        active ? 'SOLDE DISPONIBLE' : 'NON ACTIVÉE',
-        style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.45),
-          fontSize: 9, letterSpacing: 1.5,
-        ),
-      ),
-      const SizedBox(height: 2),
-      Text(
-        active ? '\$${card!.balance.toStringAsFixed(2)}' : '——',
-        style: TextStyle(
-          color: active ? Colors.white : Colors.white38,
-          fontSize: active ? 24 : 18,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      if (active)
-        Text('USD',
-            style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.4),
-                fontSize: 10,
-                letterSpacing: 1)),
-    ]);
-  }
-
-  Widget _buildNumberRow(bool active, BuildContext context) {
-    if (!active) {
-      // blurred placeholder — BackdropFilter blurs everything behind it
-      return ClipRect(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-                vertical: 4, horizontal: 8),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.04),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '•••• •••• •••• ••••',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.3),
-                fontSize: 20,
-                letterSpacing: 3.5,
-                fontFamily: 'monospace',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    final hasNumber = card!.cardNumber != null && card!.cardNumber!.isNotEmpty;
-    if (!hasNumber) {
-      final link = card!.redeemLink;
-      return GestureDetector(
-        onTap: link != null
-            ? () async {
-                await Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => CardWebViewScreen(
-                    url: link,
-                    title: 'Récupération carte…',
-                    onCardData: (number, cvv, expiry) async {
-                      final updated = card!.copyWith(
-                          cardNumber: number, cvv: cvv, expiry: expiry);
-                      await updated.save();
-                      final rid = card!.redeemId ?? card!.cardId;
-                      if (rid != null && rid.isNotEmpty) {
-                        try { await PayGateService.markCardDelivered(rid); }
-                        catch (_) {}
-                      }
-                      if (context.mounted) Navigator.of(context).pop();
-                    },
-                  ),
-                ));
-                if (onCardCaptured != null) await onCardCaptured!();
-              }
-            : null,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Voir ma carte',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.75),
-                fontSize: 13,
-                letterSpacing: 0.5,
-                fontStyle: FontStyle.italic,
-                decoration: link != null ? TextDecoration.underline : null,
-                decorationColor: Colors.white54,
-              ),
-            ),
-            if (link != null) ...[
-              const SizedBox(width: 4),
-              Icon(Icons.open_in_new_rounded,
-                  size: 13, color: Colors.white.withValues(alpha: 0.55)),
-            ],
-          ],
-        ),
-      );
-    }
-    return Text(
-      showFull ? card!.formattedNumber : card!.maskedNumber,
-      style: const TextStyle(
-        color: Colors.white,
-        fontSize: 20,
-        letterSpacing: 3.5,
-        fontFamily: 'monospace',
-        fontWeight: FontWeight.w500,
-      ),
-    );
-  }
-
-  Widget _buildNameExpiry(bool active, String holderName) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('TITULAIRE',
-          style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.35),
-              fontSize: 8,
-              letterSpacing: 1.5)),
-      const SizedBox(height: 2),
-      Text(
-        holderName,
-        style: TextStyle(
-          color: active
-              ? Colors.white
-              : Colors.white.withValues(alpha: 0.5),
-          fontSize: 12,
-          letterSpacing: 0.8,
-        ),
-      ),
-      const SizedBox(height: 6),
-      Row(children: [
-        Text('EXP  ',
-            style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.35),
-                fontSize: 8,
-                letterSpacing: 1.5)),
-        if (!active)
-          ClipRect(
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 4, sigmaY: 4),
-              child: Text('••/••',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.3),
-                    fontSize: 12,
-                    letterSpacing: 1.5,
-                  )),
-            ),
-          )
-        else
-          Text(card!.expiry ?? '——',
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  letterSpacing: 1.5)),
-      ]),
-    ]);
-  }
-
-  Widget _buildLogo(bool active) {
-    return SizedBox(
-      width: 46, height: 28,
-      child: Stack(children: [
-        Positioned(
-          left: 0,
-          child: Container(
-            width: 28, height: 28,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: active
-                  ? const Color(0xFFEB001B).withValues(alpha: 0.85)
-                  : Colors.grey.shade800.withValues(alpha: 0.4),
-            ),
-          ),
-        ),
-        Positioned(
-          right: 0,
-          child: Container(
-            width: 28, height: 28,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: active
-                  ? const Color(0xFFF79E1B).withValues(alpha: 0.85)
-                  : Colors.grey.shade700.withValues(alpha: 0.4),
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
-}
-
-class _ShimmerPainter extends CustomPainter {
-  final double phase;
-  _ShimmerPainter(this.phase);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final x = phase * (size.width + 240) - 120;
-    final paint = Paint()
-      ..shader = LinearGradient(
-        colors: [
-          Colors.white.withValues(alpha: 0.0),
-          Colors.white.withValues(alpha: 0.05),
-          Colors.white.withValues(alpha: 0.13),
-          Colors.white.withValues(alpha: 0.05),
-          Colors.white.withValues(alpha: 0.0),
-        ],
-        stops: const [0, 0.3, 0.5, 0.7, 1],
-        begin: Alignment.centerLeft,
-        end: Alignment.centerRight,
-      ).createShader(Rect.fromLTWH(x - 120, 0, 240, size.height));
-    canvas.drawRect(
-        Rect.fromLTWH(0, 0, size.width, size.height), paint);
-  }
-
-  @override
-  bool shouldRepaint(_ShimmerPainter old) => phase != old.phase;
-}
-
-class _CardGridPainter extends CustomPainter {
-  final bool active;
-  _CardGridPainter(this.active);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: active ? 0.04 : 0.02)
-      ..strokeWidth = 0.5;
-    for (var i = 1; i < 8; i++) {
-      canvas.drawLine(Offset(size.width * i / 8, 0),
-          Offset(size.width * i / 8, size.height), paint);
-    }
-    for (var i = 1; i < 5; i++) {
-      canvas.drawLine(Offset(0, size.height * i / 5),
-          Offset(size.width, size.height * i / 5), paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_CardGridPainter old) => false;
-}
-
-// ============================================
-// ACTION BUTTON
-// ============================================
-class _ActionButton extends StatefulWidget {
-  final String label;
-  final String sublabel;
-  final IconData icon;
-  final List<Color> colors;
-  final VoidCallback onTap;
-
-  const _ActionButton({
-    required this.label,
-    required this.sublabel,
-    required this.icon,
-    required this.colors,
-    required this.onTap,
-  });
-
-  @override
-  State<_ActionButton> createState() => _ActionButtonState();
-}
-
-class _ActionButtonState extends State<_ActionButton>
-    with SingleTickerProviderStateMixin {
-  double _scale = 1.0;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _scale = 0.97),
-      onTapUp: (_) { setState(() => _scale = 1.0); widget.onTap(); },
-      onTapCancel: () => setState(() => _scale = 1.0),
-      child: AnimatedScale(
-        scale: _scale,
-        duration: const Duration(milliseconds: 120),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 17, horizontal: 22),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: widget.colors,
-              begin: Alignment.centerLeft,
-              end: Alignment.centerRight,
-            ),
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(
-                color: widget.colors.first.withValues(alpha: 0.35),
-                blurRadius: 18, offset: const Offset(0, 6),
-              ),
-              BoxShadow(
-                color: widget.colors.last.withValues(alpha: 0.20),
-                blurRadius: 28, offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 38, height: 38,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Icon(widget.icon, color: Colors.white, size: 20),
-              ),
-              const SizedBox(width: 14),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(widget.label,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15)),
-                  const SizedBox(height: 2),
-                  Text(widget.sublabel,
-                      style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.70),
-                          fontSize: 11)),
-                ],
-              ),
-              const Spacer(),
-              Icon(Icons.arrow_forward_ios_rounded,
-                  color: Colors.white.withValues(alpha: 0.5), size: 14),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TelegramButton extends StatelessWidget {
-  const _TelegramButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () async {
-        try {
-          await launchUrl(Uri.parse(kAgentTelegram),
-              mode: LaunchMode.externalApplication);
-        } catch (_) {}
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF0088CC), Color(0xFF229ED9)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(18),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF0088CC).withValues(alpha: 0.5),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 40, height: 40,
-              decoration: const BoxDecoration(
-                color: Colors.white24,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.telegram_rounded,
-                  color: Colors.white, size: 24),
-            ),
-            const SizedBox(width: 14),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('Commander via Telegram',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold)),
-                  SizedBox(height: 3),
-                  Text('Un agent traite ta commande rapidement',
-                      style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 11.5)),
-                ],
-              ),
-            ),
-            const Icon(Icons.arrow_forward_ios_rounded,
-                color: Colors.white54, size: 16),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _LoadingCard extends StatelessWidget {
-  const _LoadingCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
-      child: Container(
-        height: 216,
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(22),
-        ),
-        child: const Center(
-            child: CircularProgressIndicator(
-                color: Color(0xFF00D4FF), strokeWidth: 2)),
-      ),
-    );
-  }
-}
-
-// ============================================
-// TRANSACTION ROW
-// ============================================
-class _TxRow extends StatelessWidget {
-  final VccTx tx;
-  const _TxRow({required this.tx});
-
-  @override
-  Widget build(BuildContext context) {
-    final color =
-        tx.isDebit ? Colors.redAccent : const Color(0xFF00D4FF);
-    final sign = tx.isDebit ? '-' : '+';
-    final IconData ico;
-    switch (tx.type) {
-      case 'activation':
-        ico = Icons.credit_card_rounded;
-        break;
-      case 'recharge':
-        ico = Icons.add_card_rounded;
-        break;
-      default:
-        ico = Icons.shopping_bag_rounded;
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(
-          horizontal: 16, vertical: 13),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
-        boxShadow: AppColors.isDark ? null : [
-          BoxShadow(
-            color: const Color(0xFF6B8EF2).withValues(alpha: 0.07),
-            blurRadius: 12, offset: const Offset(0, 3)),
-        ],
-      ),
-      child: Row(children: [
-        Container(
-          width: 42, height: 42,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(13),
-          ),
-          child: Icon(ico, color: color, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(tx.label,
-                  style: TextStyle(
-                      color: AppColors.label, fontSize: 14,
-                      fontWeight: FontWeight.w500)),
-              const SizedBox(height: 3),
-              Text(
-                '${tx.date.day.toString().padLeft(2, '0')}/'
-                '${tx.date.month.toString().padLeft(2, '0')}/'
-                '${tx.date.year}  '
-                '${tx.date.hour.toString().padLeft(2, '0')}:'
-                '${tx.date.minute.toString().padLeft(2, '0')}',
-                style: TextStyle(
-                    color: AppColors.textDim,
-                    fontSize: 11),
-              ),
-            ],
-          ),
-        ),
-        Text('$sign\$${tx.amount.toStringAsFixed(2)}',
-            style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.bold,
-                fontSize: 15)),
-      ]),
-    );
-  }
-}
-
-// ============================================
-// ACTIVATION SHEET
-// ============================================
-enum _ActStep { pick, paying, checking, done }
-
-class _ActivationSheet extends StatefulWidget {
-  final void Function(VccCard) onActivated;
-  const _ActivationSheet({required this.onActivated});
-  @override
-  State<_ActivationSheet> createState() => _ActivationSheetState();
-}
-
-class _ActivationSheetState extends State<_ActivationSheet> {
-  static const _kFlow = 'activation';
-  _ActStep _step = _ActStep.pick;
-  double _amount = 10.0;
-  static const _presets = [10.0, 20.0, 50.0, 100.0];
-  static const _kMargin = 0.10;
-  bool _customMode = false;
-  final _customCtrl = TextEditingController();
-  static double _estimatedUsdt(double cardValue) =>
-      double.parse((cardValue * 1.0664 * (1 + _kMargin)).toStringAsFixed(2));
-  VccOrder? _order;
-  String? _redeemLink;
-  VccCard? _activatedCard;
-  String? _error;
-  Timer? _autoPoll;
-
-  @override
-  void initState() {
-    super.initState();
-    _restorePending();
-  }
-
-  @override
-  void dispose() {
-    _autoPoll?.cancel();
-    _customCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _restorePending() async {
-    final pending = await VccOrder.loadPending(_kFlow);
-    if (pending != null && mounted) {
-      setState(() {
-        _order = pending;
-        _amount = pending.cardValue;
-        _step = _ActStep.paying;
-      });
-      _startAutoPoll();
-    }
-  }
-
-  void _startAutoPoll() {
-    _autoPoll?.cancel();
-    _autoPoll = Timer.periodic(const Duration(seconds: 20), (_) {
-      if (_step == _ActStep.paying && _order != null) {
-        _checkStatus(silent: true);
-      }
-    });
-  }
-
-  Future<void> _cancelPending() async {
-    _autoPoll?.cancel();
-    await VccOrder.clearPending(_kFlow);
-    if (mounted) {
-      setState(() {
-        _order = null;
-        _error = null;
-        _step = _ActStep.pick;
-      });
-    }
-  }
-
-  Future<void> _createOrder() async {
-    setState(() { _step = _ActStep.paying; _error = null; _order = null; });
-    try {
-      final order = await PayGateService.createVccOrder(
-        amount: _amount,
-        holderName: UserProfile.name,
-        phone: UserProfile.phone,
-        source: 'self',
-      );
-      await order.savePending(_kFlow);
-      if (!mounted) return;
-      setState(() => _order = order);
-      _startAutoPoll();
-    } catch (e) {
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _step = _ActStep.pick;
-      });
-    }
-  }
-
-  Future<void> _checkStatus({bool silent = false}) async {
-    final id = _order?.redeemId;
-    if (id == null) return;
-    if (!silent) setState(() { _step = _ActStep.checking; _error = null; });
-    try {
-      final status = await PayGateService.checkVccStatus(id);
-      if (status['isReady'] == true) {
-        _autoPoll?.cancel();
-        await VccOrder.clearPending(_kFlow);
-        final link = status['redeemLink'] as String?;
-        final card = VccCard(
-          cardId: id,
-          redeemId: id,
-          redeemLink: link,
-          balance: _order!.cardValue,
-          isActivated: true,
-          holderName: UserProfile.name,
-        );
-        await card.save();
-        await PayGateService.markCardDelivered(id);
-        _activatedCard = card;
-        if (mounted) setState(() { _redeemLink = link; _step = _ActStep.done; });
-        widget.onActivated(card);
-      } else if (status['isPaid'] == true) {
-        if (silent) return; // auto-poll: keep waiting silently
-        setState(() {
-          _error = 'Paiement reçu — carte en cours d\'émission, revérifiez dans 1 min.';
-          _step = _ActStep.paying;
-        });
-      } else {
-        if (silent) return; // auto-poll: stay on payment screen without nagging
-        setState(() {
-          _error = 'Paiement non reçu. Vérifiez que vous avez envoyé exactement ${_order!.amountUsdt} USDT sur Polygon.';
-          _step = _ActStep.paying;
-        });
-      }
-    } catch (e) {
-      if (silent) return; // auto-poll: ignore transient network errors
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _step = _ActStep.paying;
-      });
-    }
-  }
-
-  void _openLink() {
-    final link = _redeemLink;
-    final card = _activatedCard;
-    if (link == null) return;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CardWebViewScreen(
-        url: link,
-        title: 'Récupération carte…',
-        onCardData: card == null ? null : (number, cvv, expiry) async {
-          final updated = card.copyWith(cardNumber: number, cvv: cvv, expiry: expiry);
-          await updated.save();
-          widget.onActivated(updated);
-          if (mounted) {
-            Navigator.of(context).pop(); // ferme WebView
-            Navigator.of(context).pop(); // ferme bottom sheet
-          }
-        },
-      ),
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft, end: Alignment.bottomRight,
-          colors: AppColors.isDark
-              ? [const Color(0xFF111827), const Color(0xFF0D1117)]
-              : [Colors.white, const Color(0xFFF0F5FF)],
-        ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-            ),
-            padding: const EdgeInsets.fromLTRB(24, 14, 24, 14),
-            child: Column(children: [
-              Center(child: Container(
-                width: 36, height: 4,
-                decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.4),
-                    borderRadius: BorderRadius.circular(2)),
-              )),
-              const SizedBox(height: 8),
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                const Icon(Icons.credit_card_rounded, color: Colors.white, size: 16),
-                const SizedBox(width: 8),
-                Text(_step == _ActStep.done ? 'Carte activée !' : 'Activer ma carte',
-                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800)),
-              ]),
-            ]),
-          ),
-          Padding(
-            padding: EdgeInsets.fromLTRB(24, 20, 24, MediaQuery.of(context).viewInsets.bottom + 28),
-            child: switch (_step) {
-              _ActStep.pick     => _buildPicker(),
-              _ActStep.paying   => _buildPayment(),
-              _ActStep.checking => _buildChecking(),
-              _ActStep.done     => _buildDone(),
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPicker() {
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(L.chooseAmount,
-              style: TextStyle(color: AppColors.text, fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 6),
-          Text(L.payDirectly,
-              style: TextStyle(color: AppColors.textSub, fontSize: 13)),
-          const SizedBox(height: 20),
-          // Presets + bouton Autre
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              ..._presets.map((amt) {
-                final sel = !_customMode && _amount == amt;
-                return GestureDetector(
-                  onTap: () => setState(() { _customMode = false; _amount = amt; }),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                    decoration: BoxDecoration(
-                      gradient: sel ? const LinearGradient(
-                          colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]) : null,
-                      color: sel ? null : AppColors.card,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                          color: sel ? Colors.transparent
-                              : Colors.white.withValues(alpha: 0.08)),
-                    ),
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Text('\$${amt.toStringAsFixed(0)}',
-                          style: TextStyle(
-                              color: sel ? Colors.black : Colors.white,
-                              fontWeight: FontWeight.bold, fontSize: 15)),
-                      Text('${(_estimatedUsdt(amt) * kExchangeRate).toStringAsFixed(0)} DA',
-                          style: TextStyle(
-                              color: sel ? Colors.black54 : Colors.white38,
-                              fontSize: 10)),
-                    ]),
-                  ),
-                );
-              }),
-              // Bouton Autre
-              GestureDetector(
-                onTap: () => setState(() { _customMode = true; }),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: _customMode ? const Color(0xFF8B5CF6) : AppColors.card,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: _customMode ? Colors.transparent
-                            : Colors.white.withValues(alpha: 0.08)),
-                  ),
-                  child: Text('Autre',
-                      style: TextStyle(
-                          color: _customMode ? Colors.white : AppColors.textSub,
-                          fontWeight: FontWeight.bold, fontSize: 15)),
-                ),
-              ),
-            ],
-          ),
-          // Champ montant libre
-          if (_customMode) ...[
-            const SizedBox(height: 14),
-            TextField(
-              controller: _customCtrl,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              style: TextStyle(color: AppColors.text, fontWeight: FontWeight.bold),
-              decoration: InputDecoration(
-                prefixText: '\$ ',
-                prefixStyle: const TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.bold),
-                hintText: 'Montant en USD (min \$5)',
-                hintStyle: TextStyle(color: AppColors.textDim),
-                filled: true,
-                fillColor: AppColors.card,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF8B5CF6))),
-                focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF8B5CF6), width: 2)),
-                enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF8B5CF6))),
-              ),
-              onChanged: (v) {
-                final parsed = double.tryParse(v);
-                if (parsed != null && parsed >= 5) setState(() => _amount = parsed);
-              },
-            ),
-          ],
-          const SizedBox(height: 16),
-          // Récap estimé
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.2)),
-            ),
-            child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text('Carte Mastercard',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.7))),
-              Text('≈ ${_estimatedUsdt(_amount)} USDT',
-                  style: const TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.bold)),
-            ]),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            Text(_error!, textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
-          ],
-          const SizedBox(height: 20),
-          _gradientBtn(
-            label: L.createOrder,
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-            onTap: () {
-              if (_customMode) {
-                final v = double.tryParse(_customCtrl.text);
-                if (v == null || v < 5) {
-                  setState(() => _error = 'Montant minimum : \$5');
-                  return;
-                }
-                _amount = v;
-              }
-              _createOrder();
-            },
-          ),
-          const SizedBox(height: 16),
-          // Option agent Telegram
-          GestureDetector(
-            onTap: () async {
-              try {
-                await launchUrl(Uri.parse(kAgentTelegram),
-                    mode: LaunchMode.externalApplication);
-              } catch (_) {}
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF0088CC), Color(0xFF229ED9)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF0088CC).withValues(alpha: 0.45),
-                    blurRadius: 14,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Column(children: [
-                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  const Icon(Icons.telegram_rounded, color: Colors.white, size: 22),
-                  const SizedBox(width: 8),
-                  const Text('Passer commande via un Agent',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold)),
-                ]),
-                const SizedBox(height: 6),
-                Text('Rejoins le groupe Telegram · envoi ton nom + montant',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.85),
-                        fontSize: 11.5)),
-              ]),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String _paymentUri(String toAddress, String amountUsdt) {
-    const usdtPolygon = '0xc2132D05D31c914a87C6611C10748AEb04B58e8F';
-    final micro = (double.tryParse(amountUsdt) ?? 0) * 1e6;
-    return 'ethereum:$usdtPolygon@137/transfer?address=$toAddress&uint256=${micro.toStringAsFixed(0)}';
-  }
-
-  Widget _buildPayment() {
-    final order = _order;
-    if (order == null) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 60),
-        child: Center(child: CircularProgressIndicator(color: Color(0xFF00D4FF))),
-      );
-    }
-    final addr = order.cryptoAddress;
-    final qrData = _paymentUri(addr, order.amountUsdt);
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(L.sendExactly,
-              style: TextStyle(color: AppColors.text, fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 6),
-          Text(L.usdtPolygonOnly,
-              style: TextStyle(color: AppColors.textSub, fontSize: 13)),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.4)),
-            ),
-            child: Column(children: [
-              Text(L.exactAmount,
-                  style: TextStyle(color: AppColors.textDim, fontSize: 10, letterSpacing: 1.5)),
-              const SizedBox(height: 8),
-              Text('${order.amountUsdt} USDT',
-                  style: const TextStyle(color: Color(0xFF00D4FF),
-                      fontSize: 32, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text('carte \$${order.cardValue.toStringAsFixed(0)} · réseau Polygon',
-                  style: TextStyle(color: AppColors.textDim, fontSize: 12)),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Column(children: [
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  color: Colors.white,
-                  child: QrImageView(data: qrData, size: 150, version: QrVersions.auto),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text('ADRESSE USDT (POLYGON)',
-                  style: TextStyle(color: AppColors.textDim, fontSize: 10, letterSpacing: 1.5)),
-              const SizedBox(height: 6),
-              Row(children: [
-                Expanded(
-                  child: Text(addr,
-                      style: TextStyle(color: AppColors.textSub, fontSize: 11,
-                          fontFamily: 'monospace'),
-                      maxLines: 2),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: addr));
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('Adresse copiée'),
-                      duration: Duration(seconds: 2),
-                    ));
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF00D4FF).withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 18),
-                  ),
-                ),
-              ]),
-            ]),
-          ),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.amber.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
-            ),
-            child: Text(
-              '⚠ Envoyez uniquement sur le réseau Polygon. Tout envoi sur un autre réseau sera perdu.',
-              style: TextStyle(color: Colors.amber.withValues(alpha: 0.9), fontSize: 12),
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            Text(_error!, textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.orange, fontSize: 13)),
-          ],
-          const SizedBox(height: 20),
-          _gradientBtn(
-            label: 'J\'ai payé — Vérifier',
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-            onTap: () => _checkStatus(),
-          ),
-          const SizedBox(height: 10),
-          Center(
-            child: Text('ID: ${order.redeemId}',
-                style: TextStyle(color: AppColors.textDim, fontSize: 10,
-                    fontFamily: 'monospace')),
-          ),
-          const SizedBox(height: 6),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              TextButton(
-                onPressed: _cancelPending,
-                child: const Text('Nouvelle commande',
-                    style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
-              ),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Fermer',
-                    style: TextStyle(color: Colors.white38, fontSize: 12)),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildChecking() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 60),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const CircularProgressIndicator(color: Color(0xFF00D4FF)),
-        const SizedBox(height: 20),
-        const Text('Vérification du paiement…',
-            style: TextStyle(color: Colors.white70)),
-        const SizedBox(height: 24),
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Retour', style: TextStyle(color: Colors.white38)),
-        ),
-      ]),
-    );
-  }
-
-  Widget _buildDone() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Center(
-          child: Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                  colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: const Icon(Icons.check_rounded, color: Colors.black, size: 36),
-          ).animate().scale(duration: 400.ms, curve: Curves.elasticOut),
-        ),
-        const SizedBox(height: 20),
-        const Text('Carte activée !',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white, fontSize: 22,
-                fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Text('Votre carte VCC Mastercard est prête.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
-        const SizedBox(height: 24),
-        if (_redeemLink != null)
-          _gradientBtn(
-            label: 'Voir ma carte',
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-            onTap: _openLink,
-          ),
-        const SizedBox(height: 12),
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Fermer', style: TextStyle(color: Colors.white38)),
-        ),
-      ],
-    );
-  }
-}
-
-class _Feature extends StatelessWidget {
-  final IconData icon;
-  final String text;
-  const _Feature({required this.icon, required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(children: [
-        Icon(icon, color: const Color(0xFF00D4FF), size: 18),
-        const SizedBox(width: 12),
-        Text(text,
-            style: const TextStyle(
-                color: Colors.white70, fontSize: 14)),
-      ]),
-    );
-  }
-}
-
-// ============================================
-// RECHARGE SHEET
-// ============================================
-enum _RechStep { pick, paying, checking, done }
-
-class _RechargeSheet extends StatefulWidget {
-  final VccCard card;
-  final void Function(double) onSuccess;
-  const _RechargeSheet({required this.card, required this.onSuccess});
-  @override
-  State<_RechargeSheet> createState() => _RechargeSheetState();
-}
-
-class _RechargeSheetState extends State<_RechargeSheet> {
-  static const _kFlow = 'recharge';
-  _RechStep _step = _RechStep.pick;
-  double _amount = 20.0;
-  static const _presets = [10.0, 20.0, 50.0, 100.0];
-  static const _kMargin = 0.10;
-  static double _estimatedUsdt(double v) =>
-      double.parse((v * 1.0664 * (1 + _kMargin)).toStringAsFixed(2));
-  VccOrder? _order;
-  String? _error;
-  String? _redeemLink;
-  VccCard? _rechargedCard;
-  Timer? _autoPoll;
-
-  @override
-  void initState() {
-    super.initState();
-    _restorePending();
-  }
-
-  @override
-  void dispose() {
-    _autoPoll?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _restorePending() async {
-    final pending = await VccOrder.loadPending(_kFlow);
-    if (pending != null && mounted) {
-      setState(() {
-        _order = pending;
-        _amount = pending.cardValue;
-        _step = _RechStep.paying;
-      });
-      _startAutoPoll();
-    }
-  }
-
-  void _startAutoPoll() {
-    _autoPoll?.cancel();
-    _autoPoll = Timer.periodic(const Duration(seconds: 20), (_) {
-      if (_step == _RechStep.paying && _order != null) {
-        _checkStatus(silent: true);
-      }
-    });
-  }
-
-  Future<void> _cancelPending() async {
-    _autoPoll?.cancel();
-    await VccOrder.clearPending(_kFlow);
-    if (mounted) {
-      setState(() {
-        _order = null;
-        _error = null;
-        _step = _RechStep.pick;
-      });
-    }
-  }
-
-  Future<void> _createOrder() async {
-    setState(() { _step = _RechStep.paying; _error = null; _order = null; });
-    try {
-      final order = await PayGateService.createVccOrder(
-        amount: _amount,
-        holderName: UserProfile.name,
-        phone: UserProfile.phone,
-        source: 'self',
-      );
-      await order.savePending(_kFlow);
-      if (!mounted) return;
-      setState(() => _order = order);
-      _startAutoPoll();
-    } catch (e) {
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _step = _RechStep.pick;
-      });
-    }
-  }
-
-  Future<void> _checkStatus({bool silent = false}) async {
-    final id = _order?.redeemId;
-    if (id == null) return;
-    if (!silent) setState(() { _step = _RechStep.checking; _error = null; });
-    try {
-      final status = await PayGateService.checkVccStatus(id);
-      if (status['isReady'] == true) {
-        _autoPoll?.cancel();
-        await VccOrder.clearPending(_kFlow);
-        final link = status['redeemLink'] as String?;
-        final card = VccCard(
-          cardId: id,
-          redeemId: id,
-          redeemLink: link,
-          balance: _order!.cardValue,
-          isActivated: true,
-          holderName: UserProfile.name,
-        );
-        await card.save();
-        await PayGateService.markCardDelivered(id);
-        _rechargedCard = card;
-        if (mounted) setState(() { _redeemLink = link; _step = _RechStep.done; });
-        widget.onSuccess(_order!.cardValue);
-      } else if (status['isPaid'] == true) {
-        if (silent) return;
-        setState(() {
-          _error = 'Paiement reçu — carte en cours d\'émission, revérifiez dans 1 min.';
-          _step = _RechStep.paying;
-        });
-      } else {
-        if (silent) return;
-        setState(() {
-          _error = 'Paiement non reçu. Vérifiez que vous avez envoyé exactement ${_order!.amountUsdt} USDT sur Polygon.';
-          _step = _RechStep.paying;
-        });
-      }
-    } catch (e) {
-      if (silent) return;
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _step = _RechStep.paying;
-      });
-    }
-  }
-
-  void _openLink() {
-    final link = _redeemLink;
-    final card = _rechargedCard;
-    if (link == null) return;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CardWebViewScreen(
-        url: link,
-        title: 'Récupération carte…',
-        onCardData: card == null ? null : (number, cvv, expiry) async {
-          final updated = card.copyWith(cardNumber: number, cvv: cvv, expiry: expiry);
-          await updated.save();
-          if (mounted) {
-            Navigator.of(context).pop(); // ferme WebView
-            Navigator.of(context).pop(); // ferme bottom sheet
-          }
-        },
-      ),
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) => Container(
-    decoration: BoxDecoration(
-      gradient: LinearGradient(
-        begin: Alignment.topLeft, end: Alignment.bottomRight,
-        colors: AppColors.isDark
-            ? [const Color(0xFF111827), const Color(0xFF0D1117)]
-            : [Colors.white, const Color(0xFFF0F5FF)],
-      ),
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-    ),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0096FF)]),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          padding: const EdgeInsets.fromLTRB(24, 14, 24, 14),
-          child: Column(children: [
-            Center(child: Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(2)),
-            )),
-            const SizedBox(height: 8),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              const Icon(Icons.add_card_rounded, color: Colors.white, size: 16),
-              const SizedBox(width: 8),
-              Text(_step == _RechStep.done ? 'Carte créée !' : 'Nouvelle carte VCC',
-                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800)),
-            ]),
-          ]),
-        ),
-        Padding(
-          padding: EdgeInsets.fromLTRB(24, 20, 24, MediaQuery.of(context).viewInsets.bottom + 28),
-          child: switch (_step) {
-            _RechStep.pick     => _buildSelector(),
-            _RechStep.paying   => _buildPayment(),
-            _RechStep.checking => _buildChecking(),
-            _RechStep.done     => _buildDone(),
-          },
-        ),
-      ],
-    ),
-  );
-
-  Widget _buildSelector() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Text('Nouvelle carte VCC',
-            style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 6),
-        Text('Payez directement en USDT sur le réseau Polygon',
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 13)),
-        const SizedBox(height: 22),
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 4,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: 1.3,
-          children: _presets.map((amt) {
-            final sel = _amount == amt;
-            return GestureDetector(
-              onTap: () => setState(() => _amount = amt),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                decoration: BoxDecoration(
-                  gradient: sel
-                      ? const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0096FF)])
-                      : null,
-                  color: sel ? null : AppColors.card,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: sel ? Colors.transparent : Colors.white.withValues(alpha: 0.08)),
-                  boxShadow: sel
-                      ? [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.3), blurRadius: 10)]
-                      : [],
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text('\$$amt',
-                        style: TextStyle(
-                            color: sel ? Colors.black : Colors.white,
-                            fontWeight: FontWeight.bold, fontSize: 16)),
-                    Text('${_estimatedUsdt(amt)} USDT',
-                        style: TextStyle(
-                            color: sel ? Colors.black54 : Colors.white38, fontSize: 10)),
-                  ],
-                ),
-              ),
-            );
-          }).toList(),
-        ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-          decoration: BoxDecoration(
-            color: AppColors.card,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.2)),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Total à payer',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.6))),
-              Text('${_estimatedUsdt(_amount)} USDT',
-                  style: const TextStyle(
-                      color: Color(0xFF00D4FF),
-                      fontWeight: FontWeight.bold, fontSize: 16)),
-            ],
-          ),
-        ),
-        if (_error != null) ...[
-          const SizedBox(height: 10),
-          Text(_error!, textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
-        ],
-        const SizedBox(height: 20),
-        _gradientBtn(
-          label: 'Créer ma commande',
-          loading: false,
-          colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-          onTap: _createOrder,
-        ),
-      ],
-    );
-  }
-
-  static String _paymentUri(String toAddress, String amountUsdt) {
-    const usdtPolygon = '0xc2132D05D31c914a87C6611C10748AEb04B58e8F';
-    final micro = (double.tryParse(amountUsdt) ?? 0) * 1e6;
-    return 'ethereum:$usdtPolygon@137/transfer?address=$toAddress&uint256=${micro.toStringAsFixed(0)}';
-  }
-
-  Widget _buildPayment() {
-    final order = _order;
-    if (order == null) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 60),
-        child: Center(child: CircularProgressIndicator(color: Color(0xFF00D4FF))),
-      );
-    }
-    final addr = order.cryptoAddress;
-    final qrData = _paymentUri(addr, order.amountUsdt);
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(L.sendExactly,
-              style: TextStyle(color: AppColors.text, fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 6),
-          Text(L.usdtPolygonOnly,
-              style: TextStyle(color: AppColors.textSub, fontSize: 13)),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.4)),
-            ),
-            child: Column(children: [
-              Text(L.exactAmount,
-                  style: TextStyle(color: AppColors.textDim, fontSize: 10, letterSpacing: 1.5)),
-              const SizedBox(height: 8),
-              Text('${order.amountUsdt} USDT',
-                  style: const TextStyle(color: Color(0xFF00D4FF),
-                      fontSize: 32, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text('carte \$${order.cardValue.toStringAsFixed(0)} · réseau Polygon',
-                  style: TextStyle(color: AppColors.textDim, fontSize: 12)),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Column(children: [
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  color: Colors.white,
-                  child: QrImageView(data: qrData, size: 150, version: QrVersions.auto),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text('ADRESSE USDT (POLYGON)',
-                  style: TextStyle(color: AppColors.textDim, fontSize: 10, letterSpacing: 1.5)),
-              const SizedBox(height: 6),
-              Row(children: [
-                Expanded(
-                  child: Text(addr,
-                      style: TextStyle(color: AppColors.textSub, fontSize: 11,
-                          fontFamily: 'monospace'),
-                      maxLines: 2),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: addr));
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('Adresse copiée'),
-                      duration: Duration(seconds: 2),
-                    ));
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF00D4FF).withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 18),
-                  ),
-                ),
-              ]),
-            ]),
-          ),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.amber.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
-            ),
-            child: Text(
-              '⚠ Envoyez uniquement sur le réseau Polygon. Tout envoi sur un autre réseau sera perdu.',
-              style: TextStyle(color: Colors.amber.withValues(alpha: 0.9), fontSize: 12),
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            Text(_error!, textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.orange, fontSize: 13)),
-          ],
-          const SizedBox(height: 20),
-          _gradientBtn(
-            label: 'J\'ai payé — Vérifier',
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-            onTap: () => _checkStatus(),
-          ),
-          const SizedBox(height: 10),
-          Center(
-            child: Text('ID: ${order.redeemId}',
-                style: TextStyle(color: AppColors.textDim, fontSize: 10, fontFamily: 'monospace')),
-          ),
-          const SizedBox(height: 6),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              TextButton(
-                onPressed: _cancelPending,
-                child: const Text('Nouvelle commande',
-                    style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
-              ),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Fermer',
-                    style: TextStyle(color: Colors.white38, fontSize: 12)),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildChecking() {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 60),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        CircularProgressIndicator(color: Color(0xFF00D4FF)),
-        SizedBox(height: 20),
-        Text('Vérification du paiement…', style: TextStyle(color: Colors.white70)),
-      ]),
-    );
-  }
-
-  Widget _buildDone() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Center(
-          child: Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0096FF)]),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: const Icon(Icons.check_rounded, color: Colors.black, size: 36),
-          ).animate().scale(duration: 400.ms, curve: Curves.elasticOut),
-        ),
-        const SizedBox(height: 20),
-        const Text('Carte prête !',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Text('Votre nouvelle carte VCC Mastercard est activée.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
-        const SizedBox(height: 24),
-        if (_redeemLink != null)
-          _gradientBtn(
-            label: 'Voir ma carte',
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-            onTap: _openLink,
-          ),
-        const SizedBox(height: 12),
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Fermer', style: TextStyle(color: Colors.white38)),
-        ),
-      ],
-    );
-  }
-
-}
-
-// ============================================
-// CARD DETAILS SHEET
-// ============================================
-class _CardDetailsSheet extends StatelessWidget {
-  final VccCard card;
-  const _CardDetailsSheet({required this.card});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: AppColors.isDark
-              ? [const Color(0xFF111827), const Color(0xFF0D1117)]
-              : [Colors.white, const Color(0xFFF0F5FF)],
-        ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Gradient header strip
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-            ),
-            padding: const EdgeInsets.fromLTRB(24, 14, 24, 14),
-            child: Column(children: [
-              Center(child: Container(
-                width: 36, height: 4,
-                decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.4),
-                    borderRadius: BorderRadius.circular(2)),
-              )),
-              const SizedBox(height: 10),
-              const Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.credit_card_rounded, color: Colors.white, size: 18),
-                  SizedBox(width: 8),
-                  Text('Détails de la carte',
-                      style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
-                ],
-              ),
-            ]),
-          ),
-          Padding(
-            padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 24),
-            child: Column(children: [
-              _GlassDetailCard(
-                icon: Icons.numbers_rounded,
-                iconColor: const Color(0xFF00D4FF),
-                label: 'NUMÉRO DE CARTE',
-                value: card.formattedNumber,
-                mono: true,
-                context: context,
-              ),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(child: _GlassDetailCard(
-                  icon: Icons.calendar_today_rounded,
-                  iconColor: const Color(0xFF8B5CF6),
-                  label: 'EXPIRATION',
-                  value: card.expiry ?? '—',
-                  mono: true,
-                  context: context,
-                )),
-                const SizedBox(width: 10),
-                Expanded(child: _GlassDetailCard(
-                  icon: Icons.lock_rounded,
-                  iconColor: const Color(0xFFEC4899),
-                  label: 'CVV',
-                  value: card.cvv ?? '•••',
-                  mono: true,
-                  context: context,
-                )),
-              ]),
-              const SizedBox(height: 10),
-              _GlassDetailCard(
-                icon: Icons.person_rounded,
-                iconColor: const Color(0xFF10B981),
-                label: 'TITULAIRE',
-                value: card.holderName ?? UserProfile.name,
-                mono: false,
-                context: context,
-              ),
-              if (card.redeemLink != null && card.redeemLink!.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => CardWebViewScreen(
-                          url: card.redeemLink!,
-                          title: 'Swype — gérer la carte',
-                        ),
-                      ));
-                    },
-                    icon: const Icon(Icons.open_in_new_rounded, size: 18),
-                    label: const Text('Ouvrir Swype (solde · renommer)'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.surface,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                  ),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Icon(Icons.shield_outlined, size: 13, color: AppColors.textDim),
-                const SizedBox(width: 5),
-                Text('Ne partagez jamais ces informations',
-                    style: TextStyle(color: AppColors.textDim, fontSize: 11, fontStyle: FontStyle.italic)),
-              ]),
-            ]),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GlassDetailCard extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final String label;
-  final String value;
-  final bool mono;
-  final BuildContext context;
-  const _GlassDetailCard({
-    required this.icon, required this.iconColor,
-    required this.label, required this.value,
-    required this.mono, required this.context,
-  });
-
-  @override
-  Widget build(BuildContext _) {
-    return GestureDetector(
-      onTap: () {
-        Clipboard.setData(ClipboardData(text: value));
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Row(children: [
-            const Icon(Icons.check_circle_rounded, color: Color(0xFF00D4FF), size: 16),
-            const SizedBox(width: 8),
-            Text('$label copié !'),
-          ]),
-          backgroundColor: AppColors.card,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          duration: const Duration(seconds: 1),
-        ));
-      },
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColors.border),
-          boxShadow: AppColors.isDark ? null : [
-            BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 8, offset: const Offset(0, 2)),
-          ],
-        ),
-        child: Row(children: [
-          Container(
-            width: 36, height: 36,
-            decoration: BoxDecoration(
-              color: iconColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: iconColor, size: 18),
-          ),
-          const SizedBox(width: 12),
-          Expanded(child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: TextStyle(color: AppColors.textDim, fontSize: 9, letterSpacing: 1.5, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 3),
-              Text(value,
-                  style: TextStyle(
-                      color: AppColors.label,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      fontFamily: mono ? 'monospace' : null,
-                      letterSpacing: mono ? 1.2 : 0)),
-            ],
-          )),
-          Icon(Icons.copy_rounded, color: AppColors.textDim, size: 15),
-        ]),
-      ),
-    );
-  }
-}
-
-
-// ============================================
-// TRANSACTIONS SCREEN
-// ============================================
-class TransactionsScreen extends StatelessWidget {
-  const TransactionsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.bg,
-        elevation: 0,
-        title: Text('Historique',
-            style: TextStyle(
-                color: AppColors.label, fontWeight: FontWeight.bold)),
-      ),
-      body: FutureBuilder<List<VccTx>>(
-        future: VccTx.loadAll(),
-        builder: (ctx, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(
-                child: CircularProgressIndicator(
-                    color: Color(0xFF00D4FF)));
-          }
-          final txs = snap.data ?? [];
-          if (txs.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.receipt_long_rounded,
-                      color: AppColors.border,
-                      size: 72),
-                  const SizedBox(height: 16),
-                  Text('Aucune transaction',
-                      style: TextStyle(
-                          color: AppColors.textSub,
-                          fontSize: 16)),
-                  const SizedBox(height: 6),
-                  Text('Activez votre carte pour commencer',
-                      style: TextStyle(
-                          color: AppColors.textDim,
-                          fontSize: 13)),
-                ],
-              ),
-            );
-          }
-          return ListView.separated(
-            padding: const EdgeInsets.all(20),
-            itemCount: txs.length,
-            separatorBuilder: (_, __) =>
-                const SizedBox(height: 8),
-            itemBuilder: (_, i) => _TxRow(tx: txs[i]),
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ============================================
-// PROFILE SCREEN
-// ============================================
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
 
@@ -4961,14 +1361,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 },
               ),
               const SizedBox(height: 32),
-              _gradientBtn(
-                label: 'Enregistrer',
-                loading: _saving,
-                colors: const [
-                  Color(0xFF00D4FF), Color(0xFF8B5CF6)
-                ],
-                onTap: _save,
-              ),
+              _GradButton(label: 'Enregistrer', busy: _saving, onTap: _save),
               const SizedBox(height: 28),
               Text(L.settings,
                   style: TextStyle(color: AppColors.textSub, fontSize: 12,
@@ -5061,24 +1454,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 20),
               GestureDetector(
                 onTap: () => Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const AgentScreen())),
+                    MaterialPageRoute(builder: (_) => const AgentWalletScreen())),
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   decoration: BoxDecoration(
                     border: Border.all(
-                        color: const Color(0xFF00D4FF).withValues(alpha: 0.25)),
+                        color: const Color(0xFF8B5CF6).withValues(alpha: 0.30)),
                     borderRadius: BorderRadius.circular(14),
-                    color: const Color(0xFF00D4FF).withValues(alpha: 0.05),
+                    color: const Color(0xFF8B5CF6).withValues(alpha: 0.06),
                   ),
-                  child: Row(
+                  child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.shield_outlined,
-                          color: Color(0xFF00D4FF), size: 18),
-                      const SizedBox(width: 10),
-                      Text(L.agentMode,
-                          style: const TextStyle(
-                              color: Color(0xFF00D4FF),
+                      Icon(Icons.support_agent_rounded,
+                          color: Color(0xFF8B5CF6), size: 18),
+                      SizedBox(width: 10),
+                      Text('Espace agent — créditer un client',
+                          style: TextStyle(
+                              color: Color(0xFF8B5CF6),
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.5)),
@@ -5087,60 +1480,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              GestureDetector(
-                onTap: () async {
-                  final confirm = await showDialog<bool>(
-                    context: context,
-                    builder: (_) => AlertDialog(
-                      backgroundColor: AppColors.surface,
-                      title: Text('Réinitialiser la carte',
-                          style: TextStyle(color: AppColors.text)),
-                      content: Text(
-                          'Cette action supprimera toutes les données de ta carte VCC de l\'appareil.',
-                          style: TextStyle(color: AppColors.textDim)),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(context, false),
-                          child: const Text('Annuler',
-                              style: TextStyle(color: Colors.white54)),
-                        ),
-                        TextButton(
-                          onPressed: () => Navigator.pop(context, true),
-                          child: const Text('Supprimer',
-                              style: TextStyle(color: Colors.redAccent)),
-                        ),
-                      ],
-                    ),
-                  );
-                  if (confirm == true) {
-                    await VccCard.remove();
-                    if (mounted) setState(() {});
-                  }
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                        color: Colors.redAccent.withValues(alpha: 0.25)),
-                    borderRadius: BorderRadius.circular(14),
-                    color: Colors.redAccent.withValues(alpha: 0.05),
-                  ),
-                  child: const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.delete_outline_rounded,
-                          color: Colors.redAccent, size: 18),
-                      SizedBox(width: 10),
-                      Text('Réinitialiser ma carte',
-                          style: TextStyle(
-                              color: Colors.redAccent,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5)),
-                    ],
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -5232,985 +1571,6 @@ class _FieldLabel extends StatelessWidget {
               letterSpacing: 0.5)),
     );
   }
-}
-
-// ============================================
-// AGENT SCREEN
-// ============================================
-class AgentScreen extends StatefulWidget {
-  const AgentScreen({super.key});
-  @override
-  State<AgentScreen> createState() => _AgentScreenState();
-}
-
-class _AgentScreenState extends State<AgentScreen>
-    with SingleTickerProviderStateMixin {
-  // PIN lock
-  bool _unlocked = false;
-  String _pin = '';
-  bool _pinError = false;
-  String _pinExpected = '1234'; // loaded from AgentPin on initState
-  late AnimationController _shakeCtrl;
-  late Animation<double> _shakeAnim;
-
-  // Form
-  final _phoneCtrl   = TextEditingController();
-  final _nameCtrl    = TextEditingController();
-  final _emailCtrl   = TextEditingController();
-  final _customCtrl  = TextEditingController();
-  bool _isRecharge   = false;
-  double _amount     = 7.0;
-  bool _customMode   = false;
-  static const _presets = [7.0, 10.0, 20.0, 50.0, 100.0, 200.0, 300.0];
-
-  // State
-  bool _loading = false;
-  String? _error;
-  AgentOrder? _current; // active order being processed
-  Timer? _autoPoll;
-  bool _pinIsDefault = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _shakeCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 400));
-    _shakeAnim = TweenSequence([
-      TweenSequenceItem(tween: Tween(begin: 0.0, end: -12.0), weight: 1),
-      TweenSequenceItem(tween: Tween(begin: -12.0, end: 12.0), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: 12.0, end: -8.0), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: -8.0, end: 8.0), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: 8.0, end: 0.0), weight: 1),
-    ]).animate(_shakeCtrl);
-    _bootstrap();
-  }
-
-  Future<void> _bootstrap() async {
-    _pinExpected = await AgentPin.get();
-    _pinIsDefault = await AgentPin.isDefault();
-    final order = await AgentOrder.load();
-    if (mounted) {
-      setState(() { if (order != null) _current = order; });
-      if (order != null) _startAutoPoll();
-    }
-  }
-
-  @override
-  void dispose() {
-    _autoPoll?.cancel();
-    _shakeCtrl.dispose();
-    _phoneCtrl.dispose();
-    _nameCtrl.dispose();
-    _emailCtrl.dispose();
-    _customCtrl.dispose();
-    super.dispose();
-  }
-
-  void _pressDigit(String d) {
-    if (_pin.length >= 4) return;
-    setState(() {
-      _pin += d;
-      _pinError = false;
-    });
-    if (_pin.length == 4) {
-      Future.delayed(const Duration(milliseconds: 120), _checkPin);
-    }
-  }
-
-  void _backspace() => setState(() {
-        if (_pin.isNotEmpty) _pin = _pin.substring(0, _pin.length - 1);
-        _pinError = false;
-      });
-
-  void _checkPin() {
-    if (_pin == _pinExpected) {
-      setState(() { _unlocked = true; _pinError = false; });
-    } else {
-      setState(() { _pin = ''; _pinError = true; });
-      _shakeCtrl.forward(from: 0);
-    }
-  }
-
-  Future<void> _changePinDialog() async {
-    final newPinCtrl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text('Changer le PIN agent',
-            style: TextStyle(color: AppColors.text)),
-        content: TextField(
-          controller: newPinCtrl,
-          maxLength: 4,
-          keyboardType: TextInputType.number,
-          obscureText: true,
-          style: TextStyle(color: AppColors.text, letterSpacing: 8),
-          decoration: const InputDecoration(
-            hintText: '4 chiffres',
-            counterText: '',
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Annuler')),
-          TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Enregistrer')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    try {
-      await AgentPin.set(newPinCtrl.text.trim());
-      _pinExpected = newPinCtrl.text.trim();
-      _pinIsDefault = await AgentPin.isDefault();
-      if (mounted) {
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('PIN mis à jour')));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(e.toString().replaceAll('Exception: ', '')),
-            backgroundColor: Colors.redAccent));
-      }
-    }
-  }
-
-  void _startAutoPoll() {
-    _autoPoll?.cancel();
-    _autoPoll = Timer.periodic(const Duration(seconds: 20), (_) {
-      if (_current != null &&
-          _current!.state != AgentOrderState.completed) {
-        _checkStatus(silent: true);
-      }
-    });
-  }
-
-  Future<void> _checkStatus({bool silent = false}) async {
-    final c = _current;
-    if (c == null) return;
-    try {
-      final s = await PayGateService.checkAgentOrderStatus(c.agentOrderToken);
-      final state = switch (s['state']) {
-        'completed' => AgentOrderState.completed,
-        'paid'      => AgentOrderState.paid,
-        _           => AgentOrderState.pending,
-      };
-      if (state != c.state) {
-        final updated = c.copyWith(state: state);
-        await updated.save();
-        if (mounted) setState(() => _current = updated);
-        if (state == AgentOrderState.completed) {
-          _autoPoll?.cancel();
-        }
-      } else if (!silent) {
-        if (mounted) setState(() => _error = null); // clear stale error
-      }
-    } catch (e) {
-      if (!silent && mounted) {
-        setState(() => _error = e.toString().replaceAll('Exception: ', ''));
-      }
-    }
-  }
-
-  Future<void> _confirm() async {
-    final phone = _phoneCtrl.text.trim();
-    final name  = _nameCtrl.text.trim();
-    final email = _emailCtrl.text.trim();
-    if (phone.isEmpty || name.isEmpty || email.isEmpty) {
-      setState(() => _error = 'Téléphone, nom et email du client requis');
-      return;
-    }
-    if (!RegExp(r'^\+?\d[\d\s\-]{5,}$').hasMatch(phone)) {
-      setState(() => _error = 'Numéro invalide (format: +213 555 123 456)');
-      return;
-    }
-    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
-      setState(() => _error = 'Email client invalide');
-      return;
-    }
-    setState(() { _loading = true; _error = null; });
-    try {
-      final order = await PayGateService.createVccOrder(
-        amount: _amount,
-        holderName: name,
-        phone: phone,
-        flow: _isRecharge ? 'recharge' : 'activation',
-        source: 'agent',
-        clientEmail: email,
-      );
-      final token = order.agentOrderToken;
-      if (token == null || token.isEmpty) {
-        throw Exception('Reponse backend invalide (token manquant)');
-      }
-      final agentOrder = AgentOrder(
-        agentOrderToken: token,
-        phone:           phone,
-        holderName:      name,
-        amountUsd:       order.cardValue,
-        flow:            _isRecharge ? 'recharge' : 'activation',
-        cryptoAddress:   order.cryptoAddress,
-        amountUsdt:      order.amountUsdt,
-        createdAt:       DateTime.now(),
-        claimCode:       order.claimCode,
-      );
-      await agentOrder.save();
-      if (!mounted) return;
-      setState(() { _current = agentOrder; _loading = false; });
-      _startAutoPoll();
-    } catch (e) {
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _newOperation() async {
-    _autoPoll?.cancel();
-    await AgentOrder.clear();
-    if (mounted) {
-      setState(() {
-        _current = null;
-        _error = null;
-        _phoneCtrl.clear();
-        _nameCtrl.clear();
-        _emailCtrl.clear();
-        _customCtrl.clear();
-        _isRecharge = false;
-        _customMode = false;
-        _amount = 7.0;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.bg,
-        foregroundColor: AppColors.label,
-        elevation: 0,
-        title: const Text('Mode Agent',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        actions: [
-          if (_unlocked)
-            IconButton(
-              tooltip: 'Changer le PIN',
-              icon: const Icon(Icons.password_rounded),
-              onPressed: _changePinDialog,
-            ),
-        ],
-      ),
-      body: _unlocked ? _buildPanel() : _buildPinLock(),
-    );
-  }
-
-  // ── PIN LOCK ──────────────────────────────────────────────────
-  Widget _buildPinLock() {
-    return SafeArea(
-      child: Column(children: [
-        const SizedBox(height: 40),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF00D4FF).withValues(alpha: 0.1),
-            boxShadow: [
-              BoxShadow(
-                  color: const Color(0xFF00D4FF).withValues(alpha: 0.3),
-                  blurRadius: 24),
-            ],
-          ),
-          child: const Icon(Icons.shield_rounded,
-              color: Color(0xFF00D4FF), size: 40),
-        ),
-        const SizedBox(height: 24),
-        Text('Code Agent',
-            style: TextStyle(
-                color: AppColors.label,
-                fontSize: 22,
-                fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Text('Entrez votre code à 4 chiffres',
-            style: TextStyle(color: AppColors.hint, fontSize: 13)),
-        const SizedBox(height: 36),
-        AnimatedBuilder(
-          animation: _shakeAnim,
-          builder: (_, child) =>
-              Transform.translate(offset: Offset(_shakeAnim.value, 0), child: child),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(4, (i) {
-              final filled = i < _pin.length;
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                margin: const EdgeInsets.symmetric(horizontal: 10),
-                width: 18, height: 18,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _pinError
-                      ? Colors.redAccent
-                      : filled
-                          ? const Color(0xFF00D4FF)
-                          : Colors.white12,
-                  boxShadow: filled && !_pinError
-                      ? [BoxShadow(
-                          color: const Color(0xFF00D4FF).withValues(alpha: 0.5),
-                          blurRadius: 8)]
-                      : null,
-                ),
-              );
-            }),
-          ),
-        ),
-        if (_pinError) ...[
-          const SizedBox(height: 12),
-          const Text('Code incorrect',
-              style: TextStyle(color: Colors.redAccent, fontSize: 13)),
-        ],
-        const Spacer(),
-        // Numpad
-        Padding(
-          padding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
-          child: Column(
-            children: [
-              for (final row in [
-                ['1', '2', '3'],
-                ['4', '5', '6'],
-                ['7', '8', '9'],
-                ['', '0', '⌫'],
-              ])
-                Row(
-                  children: row.map((d) {
-                    if (d.isEmpty) return const Expanded(child: SizedBox());
-                    return Expanded(
-                      child: GestureDetector(
-                        onTap: () =>
-                            d == '⌫' ? _backspace() : _pressDigit(d),
-                        child: Container(
-                          margin: const EdgeInsets.all(6),
-                          height: 64,
-                          decoration: BoxDecoration(
-                            color: d == '⌫'
-                                ? Colors.transparent
-                                : AppColors.card,
-                            borderRadius: BorderRadius.circular(14),
-                            border: d == '⌫'
-                                ? null
-                                : Border.all(
-                                    color: Colors.white.withValues(alpha: 0.06)),
-                          ),
-                          child: Center(
-                            child: d == '⌫'
-                                ? const Icon(Icons.backspace_outlined,
-                                    color: Colors.white54, size: 22)
-                                : Text(d,
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.w500)),
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-            ],
-          ),
-        ),
-      ]),
-    );
-  }
-
-  // ── AGENT PANEL ───────────────────────────────────────────────
-  Widget _buildPanel() {
-    return Column(children: [
-      if (_pinIsDefault)
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          color: Colors.redAccent.withValues(alpha: 0.12),
-          child: Row(children: [
-            const Icon(Icons.warning_amber_rounded,
-                color: Colors.redAccent, size: 18),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'PIN par défaut (1234) — changez-le maintenant.',
-                style: TextStyle(color: Colors.redAccent.withValues(alpha: 0.95), fontSize: 12, fontWeight: FontWeight.w600),
-              ),
-            ),
-            TextButton(
-              onPressed: _changePinDialog,
-              style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 10)),
-              child: const Text('Changer',
-                  style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
-            ),
-          ]),
-        ),
-      Expanded(
-        child: _current != null ? _buildOrderStatus() : _buildForm(),
-      ),
-    ]);
-  }
-
-  Widget _buildForm() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const SizedBox(height: 12),
-          // Type toggle
-          Container(
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Row(children: [
-              _typeBtn('Activation', !_isRecharge, () {
-                setState(() { _isRecharge = false; _amount = 7.0; });
-              }),
-              _typeBtn('Rechargement', _isRecharge, () {
-                setState(() { _isRecharge = true; _amount = 20.0; });
-              }),
-            ]),
-          ),
-          const SizedBox(height: 24),
-          const _FieldLabel('Téléphone du client *'),
-          TextField(
-            controller: _phoneCtrl,
-            keyboardType: TextInputType.phone,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              hintText: '+213 XXX XXX XXX',
-              hintStyle: TextStyle(color: AppColors.hint),
-              filled: true,
-              fillColor: AppColors.card,
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide:
-                      const BorderSide(color: Color(0xFF00D4FF))),
-              contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 14),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const _FieldLabel('Nom complet du client *'),
-          TextField(
-            controller: _nameCtrl,
-            textCapitalization: TextCapitalization.words,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              hintText: 'Prénom Nom',
-              hintStyle: TextStyle(color: AppColors.hint),
-              filled: true,
-              fillColor: AppColors.card,
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide:
-                      const BorderSide(color: Color(0xFF00D4FF))),
-              contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 14),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const _FieldLabel('Email du client *'),
-          TextField(
-            controller: _emailCtrl,
-            keyboardType: TextInputType.emailAddress,
-            autocorrect: false,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              hintText: 'client@email.com',
-              hintStyle: TextStyle(color: AppColors.hint),
-              helperText: 'Doit être l\'email que le client a vérifié dans son app Tchipa.',
-              helperStyle: TextStyle(color: AppColors.textDim, fontSize: 11),
-              filled: true,
-              fillColor: AppColors.card,
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide:
-                      const BorderSide(color: Color(0xFF00D4FF))),
-              contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 14),
-            ),
-          ),
-          if (_isRecharge) ...[
-            const SizedBox(height: 20),
-            const _FieldLabel('Montant (USD)'),
-            Wrap(
-              spacing: 8, runSpacing: 8,
-              children: [
-                ..._presets.where((p) => p != 7.0).map((p) {
-                  final sel = !_customMode && _amount == p;
-                  return GestureDetector(
-                    onTap: () => setState(() { _amount = p; _customMode = false; _customCtrl.clear(); }),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(10),
-                        color: sel ? const Color(0xFF00D4FF) : AppColors.card,
-                        border: sel ? null : Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: Text('\$${p.toStringAsFixed(0)}',
-                          style: TextStyle(
-                              color: sel ? Colors.black : Colors.white70,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  );
-                }),
-                GestureDetector(
-                  onTap: () => setState(() { _customMode = true; }),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      color: _customMode ? const Color(0xFF8B5CF6) : AppColors.card,
-                      border: _customMode ? null : Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                    ),
-                    child: Text('Autre',
-                        style: TextStyle(
-                            color: _customMode ? Colors.white : Colors.white70,
-                            fontWeight: FontWeight.w600)),
-                  ),
-                ),
-              ],
-            ),
-            if (_customMode) ...[
-              const SizedBox(height: 12),
-              TextField(
-                controller: _customCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                style: TextStyle(color: AppColors.inputFg),
-                onChanged: (v) {
-                  final parsed = double.tryParse(v);
-                  if (parsed != null && parsed >= 5) setState(() => _amount = parsed);
-                },
-                decoration: InputDecoration(
-                  hintText: 'Montant libre (min 5\$)',
-                  hintStyle: TextStyle(color: Colors.white38),
-                  prefixText: '\$ ',
-                  prefixStyle: const TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.bold),
-                  filled: true,
-                  fillColor: AppColors.card,
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFF8B5CF6))),
-                  focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFF8B5CF6), width: 2)),
-                  enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(color: const Color(0xFF8B5CF6).withValues(alpha: 0.5))),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                ),
-              ),
-            ],
-          ],
-          const SizedBox(height: 24),
-          // Summary box — shown only for recharge (no fee display for activation)
-          if (_isRecharge)
-          Container(
-            padding: const EdgeInsets.symmetric(
-                vertical: 14, horizontal: 20),
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                  color: const Color(0xFF00D4FF).withValues(alpha: 0.3)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('Montant à encaisser',
-                    style: TextStyle(
-                        color: AppColors.textSub,
-                        fontSize: 13)),
-                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  Text('\$${_amount.toStringAsFixed(0)} USD',
-                      style: const TextStyle(
-                          color: Color(0xFF00D4FF),
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold)),
-                  Text(
-                      '${(_amount * kExchangeRate).toStringAsFixed(0)} DA',
-                      style: TextStyle(
-                          color: AppColors.textDim,
-                          fontSize: 11)),
-                ]),
-              ],
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                  color: Colors.redAccent.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10)),
-              child: Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: Colors.redAccent, fontSize: 13)),
-            ),
-          ],
-          const SizedBox(height: 24),
-          _gradientBtn(
-            label: _isRecharge
-                ? 'Confirmer le rechargement'
-                : 'Activer la carte',
-            loading: _loading,
-            colors: const [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-            onTap: _confirm,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _typeBtn(String label, bool active, VoidCallback onTap) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          margin: const EdgeInsets.all(4),
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            gradient: active
-                ? const LinearGradient(
-                    colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)])
-                : null,
-          ),
-          child: Text(label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  color: active ? Colors.black : AppColors.sublabel,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13)),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildOrderStatus() {
-    final o = _current!;
-    final isCompleted = o.state == AgentOrderState.completed;
-    final isPaid      = o.state == AgentOrderState.paid;
-
-    // Icon + headline reflect the actual lifecycle stage so the agent
-    // can never confuse "order created" with "payment confirmed".
-    final IconData icon;
-    final Color   iconColor;
-    final String  headline;
-    final String  subline;
-    if (isCompleted) {
-      icon = Icons.check_circle_rounded;
-      iconColor = const Color(0xFF22D3A1);
-      headline = 'Carte livrée au client';
-      subline = 'Le client ${o.holderName} (${o.phone}) verra la carte apparaître dans son app Tchipa.';
-    } else if (isPaid) {
-      icon = Icons.hourglass_bottom_rounded;
-      iconColor = const Color(0xFFFFB020);
-      headline = 'Paiement reçu — carte en émission';
-      subline = 'PayGate génère la carte (~30–60s). On vérifie automatiquement.';
-    } else {
-      icon = Icons.payments_rounded;
-      iconColor = const Color(0xFF00D4FF);
-      headline = 'En attente du paiement USDT';
-      subline = 'Envoyez exactement le montant ci-dessous au wallet VPS (Polygon). On vérifie automatiquement.';
-    }
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 24, 20, 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: iconColor.withValues(alpha: 0.12),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(icon, color: iconColor, size: 48),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Text(headline,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  color: AppColors.text,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          Text(subline,
-              textAlign: TextAlign.center,
-              style: TextStyle(color: AppColors.textSub, fontSize: 13)),
-          const SizedBox(height: 20),
-
-          // Client info — always visible (no card secrets here, just routing info)
-          _infoCard('Client', '${o.holderName}  ·  ${o.phone}', Icons.person_outline_rounded),
-          const SizedBox(height: 12),
-          _infoCard('Type · Montant',
-              '${o.flow == 'recharge' ? 'Rechargement' : 'Activation'}  ·  \$${o.amountUsd.toStringAsFixed(0)}',
-              Icons.tune_rounded),
-          const SizedBox(height: 12),
-
-          // Claim code — to be relayed to the client out-of-band (Telegram).
-          // Without it the user's app cannot unlock the redeem link, so
-          // someone who only knows the phone number can't steal the card.
-          if (o.claimCode != null && o.claimCode!.isNotEmpty) ...[
-            _ClaimCodeCard(code: o.claimCode!),
-            const SizedBox(height: 12),
-          ],
-
-          // Payment instructions — hide once paid
-          if (!isPaid && !isCompleted) ...[
-            _infoCard('Montant USDT (Polygon)', '${o.amountUsdt} USDT', Icons.toll_rounded),
-            const SizedBox(height: 12),
-            _infoCard('Envoyer USDT ici (Polygon)', o.cryptoAddress, Icons.account_balance_wallet_rounded),
-            const SizedBox(height: 12),
-          ],
-
-          // Référence courte (8 premiers chars du token) — utile pour le SAV
-          // sans jamais exposer le redeem_id sous-jacent au PayGate.
-          _infoCard(
-            'Référence',
-            o.agentOrderToken.isEmpty
-                ? '—'
-                : o.agentOrderToken.substring(0, 8).toUpperCase(),
-            Icons.tag_rounded,
-          ),
-
-          if (_error != null) ...[
-            const SizedBox(height: 16),
-            Text(_error!, textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
-          ],
-
-          const SizedBox(height: 24),
-          if (!isCompleted)
-            _gradientBtn(
-              label: 'Vérifier le paiement',
-              loading: false,
-              colors: const [Color(0xFF00D4FF), Color(0xFF0096FF)],
-              onTap: () => _checkStatus(),
-            ),
-          if (isCompleted)
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: const Color(0xFF22D3A1).withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF22D3A1).withValues(alpha: 0.3)),
-              ),
-              child: Row(children: [
-                const Icon(Icons.lock_outline_rounded,
-                    color: Color(0xFF22D3A1), size: 18),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Les détails de la carte (numéro, CVV, expiration) ne sont jamais visibles côté agent. Ils n\'apparaissent que sur l\'app du client.',
-                    style: TextStyle(color: AppColors.textSub, fontSize: 12),
-                  ),
-                ),
-              ]),
-            ),
-          const SizedBox(height: 12),
-          _gradientBtn(
-            label: 'Nouvelle opération',
-            loading: false,
-            colors: const [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
-            onTap: _newOperation,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoCard(String label, String value, IconData icon) {
-    return GestureDetector(
-      onTap: () {
-        Clipboard.setData(ClipboardData(text: value));
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('$label copié'),
-          duration: const Duration(seconds: 1),
-          backgroundColor: AppColors.card,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10)),
-        ));
-      },
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-              color: const Color(0xFF00D4FF).withValues(alpha: 0.2)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Icon(icon, color: const Color(0xFF00D4FF), size: 14),
-              const SizedBox(width: 6),
-              Text(label,
-                  style: const TextStyle(
-                      color: Colors.white38,
-                      fontSize: 10,
-                      letterSpacing: 1.2)),
-              const Spacer(),
-              const Icon(Icons.copy_rounded,
-                  color: Colors.white24, size: 14),
-            ]),
-            const SizedBox(height: 8),
-            Text(value,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    fontFamily: 'monospace',
-                    letterSpacing: 1.5)),
-          ],
-        ),
-      ),
-    );
-  }
-
-}
-
-// Prominent claim-code card shown in the agent panel. The agent must read
-// this code and send it to the client via Telegram/SMS — the client's app
-// asks for it before unlocking the redeem link.
-class _ClaimCodeCard extends StatelessWidget {
-  final String code;
-  const _ClaimCodeCard({required this.code});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        Clipboard.setData(ClipboardData(text: code));
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Code copié — envoyez-le au client'),
-          duration: const Duration(seconds: 2),
-          backgroundColor: AppColors.card,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10)),
-        ));
-      },
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [
-              const Color(0xFFFFB020).withValues(alpha: 0.18),
-              const Color(0xFFFF7A00).withValues(alpha: 0.08),
-            ],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-              color: const Color(0xFFFFB020).withValues(alpha: 0.5)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              const Icon(Icons.vpn_key_rounded,
-                  color: Color(0xFFFFB020), size: 16),
-              const SizedBox(width: 8),
-              const Text('CODE DE DÉVERROUILLAGE',
-                  style: TextStyle(
-                      color: Color(0xFFFFB020),
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2)),
-              const Spacer(),
-              const Icon(Icons.copy_rounded,
-                  color: Color(0xFFFFB020), size: 16),
-            ]),
-            const SizedBox(height: 10),
-            Center(
-              child: Text(code,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 32,
-                      fontWeight: FontWeight.bold,
-                      fontFamily: 'monospace',
-                      letterSpacing: 10)),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Envoyez ce code au client par Telegram. Sans lui, son app ne pourra pas récupérer la carte.',
-              style: TextStyle(color: AppColors.textSub, fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ============================================
-// SHARED HELPERS
-// ============================================
-
-Widget _gradientBtn({
-  required String label,
-  required bool loading,
-  required List<Color> colors,
-  required VoidCallback onTap,
-}) {
-  return GestureDetector(
-    onTap: loading ? null : onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: colors),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: loading
-          ? const Center(
-              child: SizedBox(
-                width: 22, height: 22,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2.5, color: Colors.black),
-              ),
-            )
-          : Text(label,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                  color: Colors.black,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16)),
-    ),
-  );
 }
 
 // ============================================
@@ -6340,379 +1700,2132 @@ class _ElectricLogoPainter extends CustomPainter {
 }
 
 // ============================================
-// CARD WEBVIEW SCREEN
+// BOUTIQUE 1688 + PORTE-MONNAIE $ (2026-09-28)
 // ============================================
-class CardWebViewScreen extends StatefulWidget {
-  final String url;
-  final String title;
-  final void Function(String? cardNumber, String? cvv, String? expiry)? onCardData;
-  const CardWebViewScreen({super.key, required this.url, this.title = 'Ma carte', this.onCardData});
+// PayGate/Swype are gone: Tchipa now sells clothes (1688 catalogue) paid with
+// a USD balance. The balance is credited by a human agent (dinars via
+// BaridiMob). Server routes: /shop/*, /wallet/*, /agent/* in backend/server.js.
+// The app never sends a price — the server charges the chosen variant's price.
 
-  @override
-  State<CardWebViewScreen> createState() => _CardWebViewScreenState();
+const LinearGradient _kShopGrad =
+    LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]);
+
+String _usd(num v) => '${v.toStringAsFixed(2)} \$';
+
+String _idemKey() {
+  final r = Random.secure();
+  return List.generate(24, (_) => r.nextInt(16).toRadixString(16)).join();
 }
 
-class _CardWebViewScreenState extends State<CardWebViewScreen> {
-  late final WebViewController _controller;
-  bool _extracted = false;
-  bool _showFallback = false; // true only if extraction failed after timeout
+String _thumb(String? url) =>
+    url == null ? '' : (url.contains('alicdn.com') ? '${url}_300x300.jpg' : url);
 
-  // Robust card-data extraction. Swype's reveal page is a React SPA — the
-  // card data appears in the DOM only after async hydration finishes, which
-  // can be 2-8s after onPageFinished depending on network. So we retry on
-  // a MutationObserver-flavoured schedule rather than fire-and-forget.
-  //
-  // Strategy stack, each attempt:
-  //   1. <input>/<textarea> values — Swype renders the card in masked
-  //      inputs the user can "reveal"/"copy"; .value carries the data even
-  //      when textContent is empty.
-  //   2. Leaf elements with short numeric text — divs/spans holding the PAN
-  //      after the user clicks "show".
-  //   3. data-* attributes & aria-labels — copy-to-clipboard buttons often
-  //      stash the value here.
-  //   4. Whole-body regex sweep — last resort if the above selectors miss.
-  static const _kExtractJs = r'''
-(function(){
-  if (window.__tchipaExtractStarted) return; window.__tchipaExtractStarted = true;
-  var attempts = 0;
-  var MAX_ATTEMPTS = 12;        // ~18s total at 1500ms apart
-  var INTERVAL_MS = 1500;
-  function looksLikePan(s){ var d=String(s||'').replace(/[\s-]/g,''); return /^\d{15,19}$/.test(d) ? d : null; }
-  function looksLikeCvv(s){ var d=String(s||'').replace(/\D/g,''); return /^\d{3,4}$/.test(d) ? d : null; }
-  function looksLikeExp(s){ var t=String(s||'').trim(); return /\b(0[1-9]|1[0-2])[\/\-](\d{2,4})\b/.test(t) ? t.match(/\b(0[1-9]|1[0-2])[\/\-](\d{2,4})\b/)[0] : null; }
-  function collect(){
-    var hits = { n:null, c:null, e:null };
-    // --- inputs / textareas (value) ---
-    var inputs = document.querySelectorAll('input,textarea');
-    for (var i = 0; i < inputs.length; i++) {
-      var v = inputs[i].value || inputs[i].getAttribute('value') || '';
-      if (!v) continue;
-      if (!hits.n) { var n = looksLikePan(v); if (n) hits.n = n; }
-      if (!hits.c) { var c = looksLikeCvv(v); if (c) hits.c = c; }
-      if (!hits.e) { var e = looksLikeExp(v); if (e) hits.e = e; }
-    }
-    // --- data-clipboard-text / data-value / aria-label on any element ---
-    if (!hits.n || !hits.c || !hits.e) {
-      var withAttrs = document.querySelectorAll('[data-clipboard-text],[data-value],[data-copy],[aria-label]');
-      for (var j = 0; j < withAttrs.length; j++) {
-        var el = withAttrs[j];
-        var v2 = el.getAttribute('data-clipboard-text') || el.getAttribute('data-value') ||
-                 el.getAttribute('data-copy') || el.getAttribute('aria-label') || '';
-        if (!v2) continue;
-        if (!hits.n) { var n2 = looksLikePan(v2); if (n2) hits.n = n2; }
-        if (!hits.c) { var c2 = looksLikeCvv(v2); if (c2) hits.c = c2; }
-        if (!hits.e) { var e2 = looksLikeExp(v2); if (e2) hits.e = e2; }
-      }
-    }
-    // --- leaf elements (short text only) ---
-    if (!hits.n || !hits.c || !hits.e) {
-      var all = document.querySelectorAll('*');
-      for (var k = 0; k < all.length && (!hits.n || !hits.c || !hits.e); k++) {
-        var elx = all[k];
-        if (elx.children && elx.children.length > 0) continue;
-        var t = (elx.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!t || t.length > 30) continue;
-        if (!hits.n) { var nn = looksLikePan(t); if (nn) hits.n = nn; }
-        if (!hits.c) { var cc = looksLikeCvv(t); if (cc) hits.c = cc; }
-        if (!hits.e) { var ee = looksLikeExp(t); if (ee) hits.e = ee; }
-      }
-    }
-    // --- whole-body regex (handles concatenated text nodes) ---
-    if (!hits.n || !hits.c || !hits.e) {
-      var b = document.body ? document.body.innerText : '';
-      if (!hits.n) { var m1 = b.match(/\b(\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/); if (m1) hits.n = m1[1].replace(/[\s-]/g,''); }
-      if (!hits.c) { var m2 = b.match(/CVV[^\d]{0,10}(\d{3,4})/i)||b.match(/CVC[^\d]{0,10}(\d{3,4})/i)||b.match(/Security[^\d]{0,15}(\d{3,4})/i); if (m2) hits.c = m2[1]; }
-      if (!hits.e) { var m3 = b.match(/\b(0[1-9]|1[0-2])[\/\-](\d{2,4})\b/); if (m3) hits.e = m3[0]; }
-    }
-    return hits;
+class ApiError implements Exception {
+  final int status;
+  final String message;
+  final Map<String, dynamic> body;
+  ApiError(this.status, this.message, this.body);
+  @override
+  String toString() => message;
+}
+
+class ShopApi {
+  static const _tokKey = 'wallet_token', _agentKey = 'agent_token';
+  static String? walletToken;
+  static String? agentToken;
+
+  static Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    walletToken = p.getString(_tokKey);
+    agentToken = p.getString(_agentKey);
   }
-  function tick(){
-    attempts++;
-    try {
-      var r = collect();
-      if (r.n) { // PAN is the gate — without it the whole row is useless
-        TchipaCard.postMessage(JSON.stringify({cardNumber:r.n, cvv:r.c, expiry:r.e}));
-        return;
-      }
-    } catch(err){ /* swallow per-tick; keep retrying */ }
-    if (attempts < MAX_ATTEMPTS) {
-      setTimeout(tick, INTERVAL_MS);
+
+  static Future<void> _save(String k, String? v) async {
+    final p = await SharedPreferences.getInstance();
+    if (v == null) {
+      await p.remove(k);
     } else {
-      // Final diagnostic so we know what the page actually contained.
-      try {
-        var snippet = (document.body ? document.body.innerText : '').slice(0, 400);
-        TchipaCard.postMessage(JSON.stringify({error:'extraction_timeout', snippet:snippet}));
-      } catch(_){ TchipaCard.postMessage(JSON.stringify({error:'extraction_timeout'})); }
+      await p.setString(k, v);
     }
   }
-  setTimeout(tick, 800); // small head start so the SPA can render the first frame
-})();
-''';
 
-  // Web (iPhone PWA): webview_flutter has no web implementation and PayGate's
-  // reveal page can't be embedded/scraped cross-origin anyway. Open the redeem
-  // link in a new browser tab instead; manual entry stays available.
-  Future<void> _openExternally() async {
-    final uri = Uri.parse(widget.url);
-    await launchUrl(uri, webOnlyWindowName: '_blank',
-        mode: LaunchMode.externalApplication);
+  static Future<Map<String, dynamic>> _req(String method, String path,
+      {Map<String, dynamic>? body, String? bearer}) async {
+    final uri = Uri.parse('$kVpsBase$path');
+    final h = {
+      'Content-Type': 'application/json',
+      if (bearer != null) 'Authorization': 'Bearer $bearer',
+    };
+    http.Response r;
+    try {
+      r = method == 'GET'
+          ? await http.get(uri, headers: h).timeout(const Duration(seconds: 25))
+          : await http
+              .post(uri, headers: h, body: jsonEncode(body ?? {}))
+              .timeout(const Duration(seconds: 25));
+    } on TimeoutException {
+      throw ApiError(0, 'Le serveur ne répond pas. Réessaie dans un instant.', {});
+    } catch (_) {
+      throw ApiError(0, 'Pas de connexion internet.', {});
+    }
+    Map<String, dynamic> d;
+    try {
+      d = jsonDecode(r.body) as Map<String, dynamic>;
+    } catch (_) {
+      d = {};
+    }
+    if (r.statusCode >= 400) {
+      if (r.statusCode == 401 && bearer != null && bearer == walletToken) {
+        walletToken = null;
+        await _save(_tokKey, null);
+      }
+      throw ApiError(r.statusCode, (d['error'] ?? 'Erreur ${r.statusCode}').toString(), d);
+    }
+    return d;
+  }
+
+  // Client wallet
+  static bool get loggedIn => walletToken != null;
+  static Future<double> login(String phone, String pin) async {
+    final d = await _req('POST', '/wallet/login', body: {'phone': phone, 'pin': pin});
+    walletToken = d['token'] as String;
+    await _save(_tokKey, walletToken);
+    return (d['balanceUsd'] as num).toDouble();
+  }
+
+  static Future<Map<String, dynamic>> me() => _req('GET', '/wallet/me', bearer: walletToken);
+
+  static Future<void> logout() async {
+    try {
+      await _req('POST', '/wallet/logout', bearer: walletToken);
+    } catch (_) {}
+    walletToken = null;
+    await _save(_tokKey, null);
+  }
+
+  // Shop
+  static Future<List<dynamic>> categories() async =>
+      (await _req('GET', '/shop/categories'))['categories'] as List;
+
+  static Future<Map<String, dynamic>> products(
+      {String? category, String? sub, String q = '', String sort = 'pop', double? max, int page = 1}) {
+    final qs = {
+      'page': '$page',
+      'sort': sort,
+      if (category != null) 'category': category,
+      if (sub != null) 'sub': sub,
+      if (max != null) 'max': '$max',
+      if (q.trim().isNotEmpty) 'q': q.trim(),
+    };
+    return _req('GET', '/shop/products?${Uri(queryParameters: qs).query}');
+  }
+
+  static Future<Map<String, dynamic>> product(int id) => _req('GET', '/shop/products/$id');
+
+  static Future<Map<String, dynamic>> placeOrder(
+          List<CartLine> lines, Map<String, String> delivery, String idem) =>
+      _req('POST', '/shop/orders', bearer: walletToken, body: {
+        'items': lines
+            .map((l) => {'productId': l.productId, 'variant': l.variant, 'qty': l.qty})
+            .toList(),
+        'delivery': delivery,
+        'idempotencyKey': idem,
+      });
+
+  static Future<List<dynamic>> myOrders() async =>
+      (await _req('GET', '/shop/orders', bearer: walletToken))['orders'] as List;
+
+  // Agent
+  static Future<Map<String, dynamic>> agentMe([String? token]) =>
+      _req('GET', '/agent/me', bearer: token ?? agentToken);
+
+  static Future<void> setAgentToken(String? t) async {
+    agentToken = t;
+    await _save(_agentKey, t);
+  }
+
+  static Future<Map<String, dynamic>> agentCredit(
+          {required String phone,
+          required String amount,
+          int? dzd,
+          String? ref,
+          required String idem}) =>
+      _req('POST', '/agent/wallet/credit', bearer: agentToken, body: {
+        'phone': phone,
+        'amountUsd': amount,
+        if (dzd != null) 'dzd': dzd,
+        if (ref != null && ref.isNotEmpty) 'ref': ref,
+        'idempotencyKey': idem,
+      });
+
+  static Future<List<dynamic>> agentCredits() async =>
+      (await _req('GET', '/agent/credits', bearer: agentToken))['credits'] as List;
+}
+
+// ── Panier (persisté sur le téléphone) ──────────────────────────────────
+class CartLine {
+  final int productId;
+  final String title;
+  final String? image;
+  final String variant; // 1688 props_names, ex. "Color:Black;Size:L"
+  final Map<String, dynamic> props;
+  final double unitUsd; // prix affiché ; le serveur recalcule au paiement
+  int qty;
+  CartLine({
+    required this.productId,
+    required this.title,
+    required this.image,
+    required this.variant,
+    required this.props,
+    required this.unitUsd,
+    this.qty = 1,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'productId': productId, 'title': title, 'image': image, 'variant': variant,
+        'props': props, 'unitUsd': unitUsd, 'qty': qty,
+      };
+
+  factory CartLine.fromJson(Map<String, dynamic> j) => CartLine(
+        productId: j['productId'] as int,
+        title: j['title'] as String,
+        image: j['image'] as String?,
+        variant: j['variant'] as String,
+        props: Map<String, dynamic>.from(j['props'] as Map? ?? {}),
+        unitUsd: (j['unitUsd'] as num).toDouble(),
+        qty: j['qty'] as int,
+      );
+
+  String get variantLabel => props.values.join(' · ');
+}
+
+class Cart {
+  static final ValueNotifier<List<CartLine>> lines = ValueNotifier(<CartLine>[]);
+
+  static Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    try {
+      final raw = jsonDecode(p.getString('cart_v1') ?? '[]') as List;
+      lines.value = raw.map((e) => CartLine.fromJson(Map<String, dynamic>.from(e as Map))).toList();
+    } catch (_) {
+      lines.value = [];
+    }
+  }
+
+  static Future<void> _persist() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('cart_v1', jsonEncode(lines.value.map((l) => l.toJson()).toList()));
+  }
+
+  static void add(CartLine l) {
+    final list = List.of(lines.value);
+    final i = list.indexWhere((x) => x.productId == l.productId && x.variant == l.variant);
+    if (i >= 0) {
+      list[i].qty = min(10, list[i].qty + l.qty);
+    } else {
+      list.add(l);
+    }
+    lines.value = list;
+    _persist();
+  }
+
+  static void setQty(CartLine l, int q) {
+    if (q <= 0) return remove(l);
+    l.qty = min(10, q);
+    lines.value = List.of(lines.value);
+    _persist();
+  }
+
+  static void remove(CartLine l) {
+    lines.value = List.of(lines.value)..remove(l);
+    _persist();
+  }
+
+  static void clear() {
+    lines.value = [];
+    _persist();
+  }
+
+  static int get count => lines.value.fold(0, (s, l) => s + l.qty);
+  static double get total => lines.value.fold(0.0, (s, l) => s + l.unitUsd * l.qty);
+}
+
+// ── Petits éléments partagés ─────────────────────────────────────────────
+class _GradButton extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+  final bool busy;
+  const _GradButton({required this.label, required this.onTap, this.busy = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null && !busy;
+    return Opacity(
+      opacity: enabled ? 1 : 0.5,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        child: Container(
+          height: 52,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(gradient: _kShopGrad, borderRadius: BorderRadius.circular(16)),
+          child: busy
+              ? const SizedBox(
+                  width: 22, height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+              : Text(label,
+                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+        ),
+      ),
+    );
+  }
+}
+
+InputDecoration _field(String label, {String? hint, IconData? icon}) => InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: icon == null ? null : Icon(icon, color: AppColors.hint, size: 20),
+      labelStyle: TextStyle(color: AppColors.sublabel),
+      hintStyle: TextStyle(color: AppColors.hint),
+      filled: true,
+      fillColor: AppColors.card,
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+    );
+
+void _toast(BuildContext context, String msg, {bool error = false}) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(msg),
+    backgroundColor: error ? const Color(0xFFB42318) : null,
+    behavior: SnackBarBehavior.floating,
+  ));
+}
+
+Widget _netImage(String? url, {BoxFit fit = BoxFit.cover, bool thumb = true}) {
+  if (url == null || url.isEmpty) return Container(color: AppColors.card);
+  Widget ph(BuildContext c, String u) => Container(color: AppColors.card);
+  return CachedNetworkImage(
+    imageUrl: thumb ? _thumb(url) : url,
+    fit: fit,
+    fadeInDuration: const Duration(milliseconds: 180),
+    placeholder: ph,
+    errorWidget: (c, u, e) => thumb
+        ? CachedNetworkImage(imageUrl: url, fit: fit, placeholder: ph, errorWidget: (c2, u2, e2) => ph(c2, u2))
+        : ph(c, u),
+  );
+}
+
+class _CartButton extends StatelessWidget {
+  const _CartButton();
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<List<CartLine>>(
+      valueListenable: Cart.lines,
+      builder: (_, __, ___) => GestureDetector(
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CartScreen())),
+        child: Stack(clipBehavior: Clip.none, children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: AppColors.card, borderRadius: BorderRadius.circular(14)),
+            child: Icon(Icons.shopping_bag_outlined, color: AppColors.label),
+          ),
+          if (Cart.count > 0)
+            Positioned(
+              right: -4, top: -4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(gradient: _kShopGrad, borderRadius: BorderRadius.circular(10)),
+                child: Text('${Cart.count}',
+                    style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800)),
+              ),
+            ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── Connexion au solde (téléphone + PIN créé à l'installation) ──────────
+Future<bool> showWalletLogin(BuildContext context) async {
+  final ok = await showModalBottomSheet<bool>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: AppColors.surface,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+    builder: (_) => const _WalletLoginSheet(),
+  );
+  return ok == true;
+}
+
+class _WalletLoginSheet extends StatefulWidget {
+  const _WalletLoginSheet();
+  @override
+  State<_WalletLoginSheet> createState() => _WalletLoginSheetState();
+}
+
+class _WalletLoginSheetState extends State<_WalletLoginSheet> {
+  final _phone = TextEditingController(text: UserProfile.phone);
+  final _pin = TextEditingController();
+  bool _busy = false;
+  String? _err;
+
+  Future<void> _go() async {
+    setState(() { _busy = true; _err = null; });
+    try {
+      await ShopApi.login(_phone.text.trim(), _pin.text.trim());
+      if (mounted) Navigator.pop(context, true);
+    } on ApiError catch (e) {
+      var msg = e.message;
+      if (e.status == 403 && e.body['attemptsRemaining'] != null) {
+        msg = 'PIN incorrect — encore ${e.body['attemptsRemaining']} essai(s).';
+      } else if (e.status == 409) {
+        msg = "Ce numéro n'a pas encore de PIN Tchipa. Crée-le dans l'onglet Profil.";
+      }
+      setState(() => _err = msg);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('Mon solde Tchipa',
+            style: TextStyle(color: AppColors.label, fontSize: 20, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 6),
+        Text('Connecte-toi avec ton numéro et ton PIN Tchipa.',
+            style: TextStyle(color: AppColors.sublabel)),
+        const SizedBox(height: 16),
+        TextField(controller: _phone, keyboardType: TextInputType.phone,
+            style: TextStyle(color: AppColors.inputFg),
+            decoration: _field('Téléphone', icon: Icons.phone_rounded)),
+        const SizedBox(height: 10),
+        TextField(controller: _pin, keyboardType: TextInputType.number, obscureText: true, maxLength: 8,
+            style: TextStyle(color: AppColors.inputFg),
+            decoration: _field('PIN', icon: Icons.lock_rounded)),
+        if (_err != null)
+          Padding(padding: const EdgeInsets.only(bottom: 10),
+              child: Text(_err!, style: const TextStyle(color: Color(0xFFF97066)))),
+        _GradButton(label: 'Se connecter', busy: _busy, onTap: _go),
+      ]),
+    );
+  }
+}
+
+// ── Onglet Boutique ──────────────────────────────────────────────────────
+// Accueil (« Tout ») : bannières, univers Femme/Homme/Enfants, meilleures ventes,
+// petits prix, puis une grille sans fin. Un univers choisi : ses sous-catégories
+// en vignettes rondes, tri, grille. Tout vient de /shop/categories et /shop/products.
+const _kShopSorts = {'pop': 'Populaires', 'price_asc': 'Prix croissant', 'price_desc': 'Prix décroissant'};
+
+String _soldLabel(num n) {
+  if (n >= 10000) return '${(n / 1000).round()}k vendus';
+  if (n >= 1000) return '${(n / 1000).toStringAsFixed(1).replaceAll('.0', '')}k vendus';
+  return '${n.toInt()} vendus';
+}
+
+class ShopScreen extends StatefulWidget {
+  const ShopScreen({super.key});
+  @override
+  State<ShopScreen> createState() => _ShopScreenState();
+}
+
+class _ShopScreenState extends State<ShopScreen> {
+  final _scroll = ScrollController();
+  final _search = TextEditingController();
+  List<dynamic> _cats = [];
+  String? _cat, _sub;
+  String _sort = 'pop';
+  final List<dynamic> _items = [];
+  List<dynamic> _best = [], _cheap = [];
+  int _page = 0, _gen = 0;
+  bool _hasMore = true, _loading = false;
+  String? _err;
+
+  bool get _home => _cat == null && _search.text.trim().isEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(() {
+      if (_scroll.position.pixels > _scroll.position.maxScrollExtent - 900) _more();
+    });
+    _reload();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    _search.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reload() async {
+    final gen = ++_gen;
+    setState(() { _items.clear(); _page = 0; _hasMore = true; _err = null; _loading = false; });
+    if (_cats.isEmpty) {
+      try {
+        final c = await ShopApi.categories();
+        if (mounted) setState(() => _cats = c);
+      } catch (_) {}
+    }
+    if (_home && _best.isEmpty) {
+      ShopApi.products(sort: 'pop').then((d) {
+        if (mounted) setState(() => _best = d['items'] as List);
+      }).catchError((_) {});
+      ShopApi.products(sort: 'pop', max: 5).then((d) {
+        if (mounted) setState(() => _cheap = d['items'] as List);
+      }).catchError((_) {});
+    }
+    if (gen == _gen) await _more();
+  }
+
+  Future<void> _more() async {
+    if (_loading || !_hasMore) return;
+    final gen = _gen;
+    setState(() => _loading = true);
+    try {
+      final d = await ShopApi.products(
+          category: _cat, sub: _sub, q: _search.text, sort: _sort, page: _page + (_home ? 2 : 1));
+      if (!mounted || gen != _gen) return;
+      setState(() {
+        _items.addAll(d['items'] as List);
+        _page++;
+        _hasMore = d['hasMore'] == true;
+      });
+    } on ApiError catch (e) {
+      if (mounted && gen == _gen) setState(() => _err = e.message);
+    } finally {
+      if (mounted && gen == _gen) setState(() => _loading = false);
+    }
+  }
+
+  void _openCat(String? c, {String? sub}) {
+    _cat = c;
+    _sub = sub;
+    _sort = 'pop';
+    _search.clear();
+    FocusScope.of(context).unfocus();
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    _reload();
+  }
+
+  Map<String, dynamic>? get _catData {
+    for (final c in _cats) {
+      if (c['name'] == _cat) return Map<String, dynamic>.from(c as Map);
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        bottom: false,
+        child: RefreshIndicator(
+          color: const Color(0xFF8B5CF6),
+          onRefresh: () async {
+            _best = [];
+            _cheap = [];
+            _cats = [];
+            await _reload();
+          },
+          child: CustomScrollView(controller: _scroll, slivers: [
+            SliverToBoxAdapter(child: _header()),
+            SliverPersistentHeader(pinned: true, delegate: _PinnedBar(height: 54, child: _catTabs())),
+            if (_home) ..._homeSlivers() else ..._listingHeader(),
+            if (_err != null && _items.isEmpty)
+              SliverToBoxAdapter(child: _errorBox()),
+            if (!_home || _items.isNotEmpty || _loading)
+              SliverToBoxAdapter(
+                child: _home
+                    ? _sectionTitle('Pour toi', 'Les plus achetés cette semaine')
+                    : const SizedBox(height: 4),
+              ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2, mainAxisSpacing: 14, crossAxisSpacing: 12, childAspectRatio: 0.58),
+                delegate: SliverChildBuilderDelegate(
+                  (_, i) => i < _items.length
+                      ? _ProductTile(p: _items[i] as Map<String, dynamic>)
+                      : const _TileSkeleton(),
+                  childCount: _items.length + (_loading ? (_items.isEmpty ? 6 : 2) : 0),
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 18, bottom: 130),
+                child: Center(
+                  child: (!_hasMore && _items.isEmpty && _err == null && !_loading)
+                      ? Column(children: [
+                          Icon(Icons.search_off_rounded, size: 46, color: AppColors.hint),
+                          const SizedBox(height: 8),
+                          Text('Aucun article trouvé', style: TextStyle(color: AppColors.sublabel)),
+                        ])
+                      : (!_hasMore && _items.isNotEmpty
+                          ? Text('Tu as tout vu ✨', style: TextStyle(color: AppColors.hint, fontSize: 12.5))
+                          : const SizedBox.shrink()),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ── En-tête : marque + panier, puis recherche ──
+  Widget _header() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 6),
+      child: Column(children: [
+        Row(children: [
+          ShaderMask(
+            shaderCallback: (r) => _kShopGrad.createShader(r),
+            child: const Text('Tchipa',
+                style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -0.5)),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+                color: const Color(0xFF8B5CF6).withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+            child: const Text('Boutique',
+                style: TextStyle(color: Color(0xFF8B5CF6), fontSize: 11, fontWeight: FontWeight.w800)),
+          ),
+          const Spacer(),
+          const _CartButton(),
+        ]),
+        const SizedBox(height: 12),
+        Container(
+          height: 46,
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(23),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: Row(children: [
+            const SizedBox(width: 14),
+            Icon(Icons.search_rounded, color: AppColors.hint, size: 21),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _search,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) {
+                  _cat = null;
+                  _sub = null;
+                  _reload();
+                },
+                onChanged: (_) => setState(() {}),
+                style: TextStyle(color: AppColors.inputFg, fontSize: 14.5),
+                decoration: InputDecoration(
+                  isCollapsed: true,
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  hintText: 'Robe longue, pyjama enfant, baskets…',
+                  hintStyle: TextStyle(color: AppColors.hint, fontSize: 14),
+                ),
+              ),
+            ),
+            if (_search.text.isNotEmpty)
+              IconButton(
+                icon: Icon(Icons.close_rounded, color: AppColors.hint, size: 20),
+                onPressed: () => _openCat(null),
+              ),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  // ── Onglets d'univers (restent collés en haut) ──
+  Widget _catTabs() {
+    final names = <String?>[null, ..._cats.map((c) => c['name'] as String)];
+    return Container(
+      color: AppColors.bg,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        children: [
+          for (final n in names)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => _openCat(n),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    gradient: _cat == n && _search.text.trim().isEmpty ? _kShopGrad : null,
+                    color: _cat == n && _search.text.trim().isEmpty ? null : AppColors.surface,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                        color: _cat == n && _search.text.trim().isEmpty ? Colors.transparent : AppColors.border),
+                  ),
+                  child: Text(n ?? 'Accueil',
+                      style: TextStyle(
+                          color: _cat == n && _search.text.trim().isEmpty ? Colors.white : AppColors.label,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13.5)),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Accueil ──
+  List<Widget> _homeSlivers() => [
+        const SliverToBoxAdapter(child: _PromoCarousel()),
+        if (_cats.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionTitle('Univers', null)),
+          SliverToBoxAdapter(
+            child: SizedBox(
+              height: 168,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                children: [
+                  for (final c in _cats)
+                    _UniverseCard(
+                      name: c['name'] as String,
+                      count: c['count'] as int,
+                      image: c['image'] as String?,
+                      onTap: () => _openCat(c['name'] as String),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+        if (_best.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionTitle('Meilleures ventes', 'Les favoris des clientes et clients')),
+          SliverToBoxAdapter(child: _hList(_best)),
+        ],
+        if (_cheap.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionTitle('Petits prix', 'Moins de 5 \$ — livraison comprise')),
+          SliverToBoxAdapter(child: _hList(_cheap)),
+        ],
+      ];
+
+  Widget _hList(List<dynamic> items) => SizedBox(
+        height: 262,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          itemCount: items.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 12),
+          itemBuilder: (_, i) =>
+              SizedBox(width: 150, child: _ProductTile(p: items[i] as Map<String, dynamic>)),
+        ),
+      );
+
+  // ── Univers choisi ou recherche : sous-catégories + tri ──
+  List<Widget> _listingHeader() {
+    final c = _catData;
+    final subs = ((c?['subs'] as List?) ?? []);
+    final searching = _search.text.trim().isNotEmpty;
+    return [
+      if (searching)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 10, 18, 0),
+            child: Text('Résultats pour « ${_search.text.trim()} »',
+                style: TextStyle(color: AppColors.label, fontSize: 17, fontWeight: FontWeight.w800)),
+          ),
+        ),
+      if (!searching && subs.isNotEmpty)
+        SliverToBoxAdapter(
+          child: SizedBox(
+            height: 112,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              children: [
+                _SubBubble(
+                    label: 'Tout',
+                    image: c?['image'] as String?,
+                    selected: _sub == null,
+                    onTap: () => _openCat(_cat)),
+                for (final s in subs)
+                  _SubBubble(
+                    label: s['name'] as String,
+                    image: s['image'] as String?,
+                    selected: _sub == s['name'],
+                    onTap: () => _openCat(_cat, sub: s['name'] as String),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 8, 10, 0),
+          child: Row(children: [
+            Expanded(
+              child: Text(
+                  _sub ?? (searching ? '' : (c == null ? '' : '${c['name']} · ${c['count']} articles')),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: AppColors.sublabel, fontSize: 13, fontWeight: FontWeight.w600)),
+            ),
+            PopupMenuButton<String>(
+              initialValue: _sort,
+              color: AppColors.surface,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              onSelected: (v) {
+                _sort = v;
+                _reload();
+              },
+              itemBuilder: (_) => [
+                for (final e in _kShopSorts.entries)
+                  PopupMenuItem(
+                    value: e.key,
+                    child: Row(children: [
+                      Icon(e.key == _sort ? Icons.radio_button_checked : Icons.radio_button_off,
+                          size: 18, color: e.key == _sort ? const Color(0xFF8B5CF6) : AppColors.hint),
+                      const SizedBox(width: 10),
+                      Text(e.value, style: TextStyle(color: AppColors.label)),
+                    ]),
+                  ),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(children: [
+                  Icon(Icons.swap_vert_rounded, size: 19, color: AppColors.label),
+                  const SizedBox(width: 4),
+                  Text(_kShopSorts[_sort]!,
+                      style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w700, fontSize: 13)),
+                ]),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    ];
+  }
+
+  Widget _sectionTitle(String title, String? sub) => Padding(
+        padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(title, style: TextStyle(color: AppColors.label, fontSize: 19, fontWeight: FontWeight.w800)),
+          if (sub != null) ...[
+            const SizedBox(height: 2),
+            Text(sub, style: TextStyle(color: AppColors.sublabel, fontSize: 12.5)),
+          ],
+        ]),
+      );
+
+  Widget _errorBox() => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(children: [
+          Icon(Icons.wifi_off_rounded, size: 42, color: AppColors.hint),
+          const SizedBox(height: 10),
+          Text(_err!, textAlign: TextAlign.center, style: TextStyle(color: AppColors.sublabel)),
+          const SizedBox(height: 12),
+          TextButton(onPressed: _reload, child: const Text('Réessayer')),
+        ]),
+      );
+}
+
+class _PinnedBar extends SliverPersistentHeaderDelegate {
+  final double height;
+  final Widget child;
+  _PinnedBar({required this.height, required this.child});
+  @override
+  double get minExtent => height;
+  @override
+  double get maxExtent => height;
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) => child;
+  @override
+  bool shouldRebuild(_PinnedBar old) => true;
+}
+
+// Bannières d'accueil : uniquement des promesses vraies (livraison et douane
+// comprises, paiement avec le solde, nouveautés réelles du catalogue).
+class _PromoCarousel extends StatefulWidget {
+  const _PromoCarousel();
+  @override
+  State<_PromoCarousel> createState() => _PromoCarouselState();
+}
+
+class _PromoCarouselState extends State<_PromoCarousel> {
+  final _pc = PageController(viewportFraction: 0.92);
+  Timer? _t;
+  int _i = 0;
+  static const _slides = [
+    (
+      Icons.local_shipping_rounded,
+      'Livré chez toi en Algérie',
+      'Livraison et douane comprises dans le prix affiché.',
+      [Color(0xFF00B4D8), Color(0xFF7C3AED)]
+    ),
+    (
+      Icons.child_care_rounded,
+      'Nouveau : Enfants & chaussures',
+      'Bébé, fille, garçon — vêtements et chaussures.',
+      [Color(0xFFF472B6), Color(0xFF8B5CF6)]
+    ),
+    (
+      Icons.account_balance_wallet_rounded,
+      'Paie avec ton solde Tchipa',
+      'Ton agent le recharge en dinars, tu commandes en un geste.',
+      [Color(0xFF10B981), Color(0xFF0EA5E9)]
+    ),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _t = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!_pc.hasClients) return;
+      _pc.animateToPage((_i + 1) % _slides.length,
+          duration: const Duration(milliseconds: 450), curve: Curves.easeOutCubic);
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    _pc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      const SizedBox(height: 8),
+      SizedBox(
+        height: 132,
+        child: PageView.builder(
+          controller: _pc,
+          itemCount: _slides.length,
+          onPageChanged: (i) => setState(() => _i = i),
+          itemBuilder: (_, i) {
+            final s = _slides[i];
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: s.$4, begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Stack(children: [
+                  Positioned(
+                    right: -18, bottom: -22,
+                    child: Icon(s.$1, size: 130, color: Colors.white.withValues(alpha: 0.16)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 18, 90, 18),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Text(s.$2,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 19, fontWeight: FontWeight.w900, height: 1.15)),
+                      const SizedBox(height: 6),
+                      Text(s.$3,
+                          style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 12.5, height: 1.3)),
+                    ]),
+                  ),
+                ]),
+              ),
+            );
+          },
+        ),
+      ),
+      const SizedBox(height: 10),
+      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        for (var i = 0; i < _slides.length; i++)
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 250),
+            width: i == _i ? 18 : 6,
+            height: 6,
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            decoration: BoxDecoration(
+              gradient: i == _i ? _kShopGrad : null,
+              color: i == _i ? null : AppColors.border,
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+      ]),
+    ]);
+  }
+}
+
+class _UniverseCard extends StatelessWidget {
+  final String name;
+  final int count;
+  final String? image;
+  final VoidCallback onTap;
+  const _UniverseCard({required this.name, required this.count, required this.image, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 132,
+        margin: const EdgeInsets.only(right: 12),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), color: AppColors.card),
+        child: Stack(fit: StackFit.expand, children: [
+          _netImage(image),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.transparent, Color(0xCC000000)],
+                stops: [0.45, 1],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 12, right: 12, bottom: 12,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w900)),
+              Text('$count articles',
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 11.5)),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+class _SubBubble extends StatelessWidget {
+  final String label;
+  final String? image;
+  final bool selected;
+  final VoidCallback onTap;
+  const _SubBubble({required this.label, required this.image, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 78,
+        child: Column(children: [
+          Container(
+            padding: const EdgeInsets.all(2.5),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: selected ? _kShopGrad : null,
+              color: selected ? null : AppColors.border,
+            ),
+            child: Container(
+              width: 60, height: 60,
+              padding: const EdgeInsets.all(2),
+              decoration: BoxDecoration(shape: BoxShape.circle, color: AppColors.bg),
+              child: ClipOval(child: _netImage(image)),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: selected ? AppColors.label : AppColors.sublabel,
+                  fontSize: 11.5,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600)),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ProductTile extends StatelessWidget {
+  final Map<String, dynamic> p;
+  const _ProductTile({required this.p});
+
+  @override
+  Widget build(BuildContext context) {
+    final from = (p['priceFrom'] as num).toDouble();
+    final to = ((p['priceTo'] as num?) ?? from).toDouble();
+    final sold = (p['sold'] as num?) ?? 0;
+    return GestureDetector(
+      onTap: () => Navigator.push(
+          context, MaterialPageRoute(builder: (_) => ProductScreen(productId: p['id'] as int))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        AspectRatio(
+          aspectRatio: 0.82,
+          child: Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(color: AppColors.card, borderRadius: BorderRadius.circular(16)),
+            child: Stack(fit: StackFit.expand, children: [
+              _netImage(p['image'] as String?),
+              if (sold >= 1000)
+                Positioned(
+                  left: 8, bottom: 8,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55), borderRadius: BorderRadius.circular(8)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.local_fire_department_rounded, size: 12, color: Color(0xFFFFB020)),
+                      const SizedBox(width: 3),
+                      Text(_soldLabel(sold),
+                          style: const TextStyle(color: Colors.white, fontSize: 10.5, fontWeight: FontWeight.w700)),
+                    ]),
+                  ),
+                ),
+            ]),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
+          child: Text('${p['title']}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: AppColors.label, fontSize: 13, fontWeight: FontWeight.w600, height: 1.25)),
+        ),
+        const Spacer(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(2, 4, 2, 2),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+            if (to > from + 0.01)
+              Text('dès ', style: TextStyle(color: AppColors.hint, fontSize: 11)),
+            Text(_usd(from),
+                style: TextStyle(color: AppColors.label, fontSize: 16.5, fontWeight: FontWeight.w900)),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+class _TileSkeleton extends StatelessWidget {
+  const _TileSkeleton();
+  @override
+  Widget build(BuildContext context) {
+    Widget bar(double w, double h) => Container(
+        width: w, height: h,
+        decoration: BoxDecoration(color: AppColors.card, borderRadius: BorderRadius.circular(6)));
+    return Shimmer.fromColors(
+      baseColor: AppColors.card,
+      highlightColor: AppColors.surface,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        AspectRatio(
+          aspectRatio: 0.82,
+          child: Container(decoration: BoxDecoration(color: AppColors.card, borderRadius: BorderRadius.circular(16))),
+        ),
+        const SizedBox(height: 10),
+        bar(double.infinity, 11),
+        const SizedBox(height: 6),
+        bar(90, 11),
+        const SizedBox(height: 12),
+        bar(60, 15),
+      ]),
+    );
+  }
+}
+
+// ── Fiche produit : chaque variante (couleur × taille) a son prix ─────────
+String _optLabel(String k) {
+  final l = k.toLowerCase();
+  if (l.contains('colo')) return 'Couleur';
+  if (l.contains('height')) return 'Taille (hauteur de l\'enfant)';
+  if (l.contains('size')) return 'Taille';
+  if (l.contains('length')) return 'Longueur';
+  return k;
+}
+
+class ProductScreen extends StatefulWidget {
+  final int productId;
+  const ProductScreen({super.key, required this.productId});
+  @override
+  State<ProductScreen> createState() => _ProductScreenState();
+}
+
+class _ProductScreenState extends State<ProductScreen> {
+  Map<String, dynamic>? _p;
+  String? _err;
+  final Map<String, String> _sel = {};
+  int _qty = 1, _img = 0;
+
+  List<Map<String, dynamic>> get _variants =>
+      ((_p?['variants'] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+
+  // Options built from the variants themselves, so every chip maps to a real variant.
+  Map<String, List<String>> get _options {
+    final o = <String, List<String>>{};
+    for (final v in _variants) {
+      (v['props'] as Map).forEach((k, val) {
+        final list = o.putIfAbsent('$k', () => []);
+        if (!list.contains('$val')) list.add('$val');
+      });
+    }
+    return o;
+  }
+
+  Map<String, dynamic>? get _current {
+    for (final v in _variants) {
+      final props = v['props'] as Map;
+      if (_sel.entries.every((e) => '${props[e.key]}' == e.value)) return v;
+    }
+    return null;
   }
 
   @override
   void initState() {
     super.initState();
-    if (kIsWeb) return; // no WebViewController on web — see _buildWeb()
-    // Always reveal the underlying WebView after 8s so the user can read +
-    // copy the numbers manually if our JS scrape fails. Total extraction
-    // budget is ~18s (12 retries × 1.5s); after that we surface a snackbar
-    // telling them to read the card directly from the page.
-    Future.delayed(const Duration(seconds: 8), () {
-      if (!_extracted && mounted) setState(() => _showFallback = true);
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final d = await ShopApi.product(widget.productId);
+      if (!mounted) return;
+      setState(() => _p = d);
+      if (_variants.isNotEmpty) {
+        (_variants.first['props'] as Map).forEach((k, v) => _sel['$k'] = '$v');
+        setState(() {});
+      }
+    } on ApiError catch (e) {
+      if (mounted) setState(() => _err = e.message);
+    }
+  }
+
+  void _pick(String key, String value) {
+    setState(() {
+      _sel[key] = value;
+      if (_current == null) {
+        // Keep the tapped value, move the other options to the first variant that has it.
+        final v = _variants.firstWhere((v) => '${(v['props'] as Map)[key]}' == value, orElse: () => {});
+        if (v.isNotEmpty) (v['props'] as Map).forEach((k, val) => _sel['$k'] = '$val');
+      }
     });
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(AppColors.bg)
-      ..addJavaScriptChannel('TchipaCard', onMessageReceived: (msg) {
-        if (_extracted || widget.onCardData == null) return;
-        try {
-          final data = jsonDecode(msg.message) as Map<String, dynamic>;
-          if (data['error'] != null) {
-            debugPrint('[CardWebView] extract error: ${data['error']} snippet=${data['snippet']?.toString() ?? ''}');
-            // Fire-and-forget POST the snippet to a debug endpoint so we can
-            // iterate on selectors without needing adb logcat from the user.
-            final snippet = data['snippet']?.toString();
-            if (snippet != null && snippet.isNotEmpty) {
-              http.post(
-                Uri.parse('$kVpsBase/debug/webview-snippet'),
-                headers: {'Content-Type': 'application/json'},
-                body: jsonEncode({'snippet': snippet, 'url': widget.url}),
-              ).timeout(const Duration(seconds: 5)).catchError((_) => http.Response('', 0));
-            }
-            if (mounted) {
-              setState(() => _showFallback = true);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: const Text('Lecture auto échouée. Tape ✏️ en haut à droite pour saisir manuellement.'),
-                backgroundColor: Colors.orange.shade800,
-                duration: const Duration(seconds: 8),
-              ));
-            }
-            return;
-          }
-          final number = data['cardNumber'] as String?;
-          final cvv = data['cvv'] as String?;
-          final expiry = data['expiry'] as String?;
-          if (number != null && number.length >= 15) {
-            _extracted = true;
-            widget.onCardData!(number, cvv, expiry);
-          }
-        } catch (_) {}
-      })
-      ..setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (_) {
-          if (widget.onCardData != null) {
-            _controller.runJavaScript(_kExtractJs);
-          }
-        },
-      ))
-      ..loadRequest(Uri.parse(widget.url));
   }
 
-  Future<void> _manualEntryDialog() async {
-    final numCtrl = TextEditingController();
-    final cvvCtrl = TextEditingController();
-    final expCtrl = TextEditingController();
-    String? errorMsg;
-    bool submitted = false;
-    await showDialog<void>(
-      context: context,
-      builder: (dlgCtx) => StatefulBuilder(builder: (dlgCtx, setDlg) {
-        void submit() {
-          final n = numCtrl.text.replaceAll(RegExp(r'[\s-]'), '');
-          final c = cvvCtrl.text.trim();
-          final e = expCtrl.text.trim();
-          if (!RegExp(r'^\d{15,19}$').hasMatch(n)) {
-            setDlg(() => errorMsg = 'Numéro invalide (15-19 chiffres)');
-            return;
-          }
-          if (!RegExp(r'^\d{3,4}$').hasMatch(c)) {
-            setDlg(() => errorMsg = 'CVV invalide (3-4 chiffres)');
-            return;
-          }
-          if (!RegExp(r'^(0[1-9]|1[0-2])[\/\-]\d{2,4}$').hasMatch(e)) {
-            setDlg(() => errorMsg = 'Expiration: MM/AA (ex 04/28)');
-            return;
-          }
-          submitted = true;
-          Navigator.of(dlgCtx).pop();
-          if (!_extracted && widget.onCardData != null) {
-            _extracted = true;
-            widget.onCardData!(n, c, e);
-          }
-        }
-        return AlertDialog(
-          backgroundColor: AppColors.surface,
-          title: const Text('Saisie manuelle', style: TextStyle(color: Colors.white)),
-          content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Text(
-                'Recopie les valeurs depuis l\'écran Swype derrière ce dialog.',
-                style: TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: numCtrl,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: Colors.white, fontFamily: 'monospace', letterSpacing: 2),
-                decoration: const InputDecoration(labelText: 'Numéro carte (16 chiffres)'),
-              ),
-              const SizedBox(height: 8),
-              Row(children: [
-                Expanded(
-                  child: TextField(
-                    controller: expCtrl,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(labelText: 'MM/AA'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: cvvCtrl,
-                    keyboardType: TextInputType.number,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(labelText: 'CVV'),
-                  ),
-                ),
-              ]),
-              if (errorMsg != null) ...[
-                const SizedBox(height: 8),
-                Text(errorMsg!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-              ],
-            ]),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dlgCtx).pop(), child: const Text('Annuler')),
-            ElevatedButton(onPressed: submit, child: const Text('Enregistrer')),
-          ],
-        );
-      }),
-    );
-    if (submitted && mounted) Navigator.of(context).pop();
-  }
+  bool _available(String key, String value) => _variants.any((v) {
+        final props = v['props'] as Map;
+        if ('${props[key]}' != value) return false;
+        return _sel.entries.where((e) => e.key != key).every((e) => '${props[e.key]}' == e.value);
+      });
 
-  // iPhone PWA build: no embedded WebView; the user opens the card in a new
-  // tab and can type the numbers manually if needed.
-  Widget _buildWeb(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.bg,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.close_rounded, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(widget.title,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-      ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.credit_card_rounded,
-                  color: Color(0xFF00D4FF), size: 64),
-              const SizedBox(height: 24),
-              const Text('Votre carte est prête',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              Text(
-                'Appuyez ci-dessous pour ouvrir votre carte dans un onglet sécurisé.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: AppColors.sublabel, fontSize: 14),
-              ),
-              const SizedBox(height: 28),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _openExternally,
-                  icon: const Icon(Icons.open_in_new_rounded),
-                  label: const Text('Ouvrir ma carte'),
-                ),
-              ),
-              if (widget.onCardData != null) ...[
-                const SizedBox(height: 12),
-                TextButton(
-                  onPressed: _manualEntryDialog,
-                  child: const Text('Saisir les infos manuellement'),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
+  void _add() {
+    final v = _current;
+    if (v == null) return;
+    Cart.add(CartLine(
+      productId: widget.productId,
+      title: '${_p!['title']}',
+      image: _p!['image'] as String?,
+      variant: '${v['name']}',
+      props: Map<String, dynamic>.from(v['props'] as Map),
+      unitUsd: (v['priceUsd'] as num).toDouble(),
+      qty: _qty,
+    ));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Ajouté au panier'),
+      behavior: SnackBarBehavior.floating,
+      action: SnackBarAction(
+          label: 'Voir le panier',
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CartScreen()))),
+    ));
   }
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) return _buildWeb(context);
+    final p = _p;
     return Scaffold(
       backgroundColor: AppColors.bg,
       appBar: AppBar(
         backgroundColor: AppColors.bg,
+        foregroundColor: AppColors.label,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.close_rounded, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(widget.title,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        actions: [
-          if (widget.onCardData != null)
-            IconButton(
-              tooltip: 'Saisir manuellement',
-              icon: const Icon(Icons.edit_note_rounded, color: Colors.white),
-              onPressed: _manualEntryDialog,
-            ),
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded, color: Colors.white54),
-            onPressed: () => _controller.reload(),
-          ),
-        ],
+        scrolledUnderElevation: 0,
+        title: Text(p == null ? '' : '${p['sub'] ?? p['category'] ?? ''}',
+            style: TextStyle(color: AppColors.label, fontSize: 16, fontWeight: FontWeight.w700)),
+        actions: const [Padding(padding: EdgeInsets.only(right: 12), child: _CartButton())],
       ),
-      body: Stack(children: [
-        WebViewWidget(controller: _controller),
-        // Hide the PayGate page behind our loading screen until extraction succeeds.
-        // Only removed (_showFallback) if JS extraction fails after 6s.
-        if (!_showFallback)
-          Container(
-            color: AppColors.bg,
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(
-                    width: 56, height: 56,
-                    child: CircularProgressIndicator(
-                      color: Color(0xFF00D4FF),
-                      strokeWidth: 2.5,
-                    ),
+      body: p == null
+          ? Center(
+              child: _err != null
+                  ? Text(_err!, style: TextStyle(color: AppColors.sublabel))
+                  : const CircularProgressIndicator())
+          : _body(p),
+    );
+  }
+
+  Widget _body(Map<String, dynamic> p) {
+    final images = ((p['images'] as List?) ?? []).cast<String>();
+    final v = _current;
+    final opts = _options;
+    final hasSize = opts.keys.any((k) => k.toLowerCase().contains('size') || k.toLowerCase().contains('height'));
+    final sold = (p['sold'] as num?) ?? 0;
+    return Column(children: [
+      Expanded(
+        child: ListView(padding: EdgeInsets.zero, children: [
+          AspectRatio(
+            aspectRatio: 0.9,
+            child: Stack(children: [
+              PageView.builder(
+                itemCount: max(1, images.length),
+                onPageChanged: (i) => setState(() => _img = i),
+                itemBuilder: (_, i) => _netImage(images.isEmpty ? null : images[i], thumb: false),
+              ),
+              if (images.length > 1)
+                Positioned(
+                  right: 14, bottom: 14,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(12)),
+                    child: Text('${_img + 1}/${images.length}',
+                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
                   ),
-                  const SizedBox(height: 24),
-                  Text('Récupération de votre carte…',
-                      style: TextStyle(color: AppColors.sublabel, fontSize: 15)),
-                  const SizedBox(height: 8),
-                  Text('Quelques secondes',
-                      style: TextStyle(color: AppColors.hint, fontSize: 13)),
-                ],
+                ),
+            ]),
+          ),
+          if (images.length > 1)
+            SizedBox(
+              height: 64,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                itemCount: images.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (_, i) => Container(
+                  width: 54,
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                        color: i == _img ? const Color(0xFF8B5CF6) : Colors.transparent, width: 2),
+                  ),
+                  child: _netImage(images[i]),
+                ),
               ),
             ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                ShaderMask(
+                  shaderCallback: (r) => _kShopGrad.createShader(r),
+                  child: Text(v == null ? '—' : _usd(v['priceUsd'] as num),
+                      style: const TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.w900)),
+                ),
+                const Spacer(),
+                if (sold > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(children: [
+                      const Icon(Icons.local_fire_department_rounded, size: 16, color: Color(0xFFFFB020)),
+                      const SizedBox(width: 3),
+                      Text(_soldLabel(sold),
+                          style: TextStyle(color: AppColors.sublabel, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
+              ]),
+              if (v == null)
+                Text('Cette combinaison n\'est pas disponible',
+                    style: TextStyle(color: AppColors.sublabel, fontSize: 12.5)),
+              const SizedBox(height: 8),
+              Text('${p['title']}',
+                  style: TextStyle(color: AppColors.label, fontSize: 18, fontWeight: FontWeight.w700, height: 1.3)),
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: const Row(children: [
+                  _Perk(icon: Icons.local_shipping_rounded, text: 'Livré en\nAlgérie'),
+                  _Perk(icon: Icons.verified_user_rounded, text: 'Douane\ncomprise'),
+                  _Perk(icon: Icons.account_balance_wallet_rounded, text: 'Payé avec\nton solde'),
+                ]),
+              ),
+              for (final e in opts.entries) ...[
+                const SizedBox(height: 20),
+                Row(children: [
+                  Text(_optLabel(e.key),
+                      style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w800, fontSize: 15)),
+                  if (_sel[e.key] != null) ...[
+                    Text('  ·  ', style: TextStyle(color: AppColors.hint)),
+                    Expanded(
+                      child: Text(_sel[e.key]!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: AppColors.sublabel, fontSize: 13.5)),
+                    ),
+                  ],
+                ]),
+                const SizedBox(height: 10),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  for (final val in e.value)
+                    GestureDetector(
+                      onTap: () => _pick(e.key, val),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 160),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                        decoration: BoxDecoration(
+                          color: _sel[e.key] == val
+                              ? const Color(0xFF8B5CF6).withValues(alpha: 0.12)
+                              : AppColors.surface,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            width: _sel[e.key] == val ? 1.6 : 1,
+                            color: _sel[e.key] == val ? const Color(0xFF8B5CF6) : AppColors.border,
+                          ),
+                        ),
+                        child: Text(val,
+                            style: TextStyle(
+                                color: _available(e.key, val) ? AppColors.label : AppColors.hint,
+                                decoration: _available(e.key, val) ? null : TextDecoration.lineThrough,
+                                fontWeight: _sel[e.key] == val ? FontWeight.w800 : FontWeight.w600)),
+                      ),
+                    ),
+                ]),
+              ],
+              if (hasSize)
+                Container(
+                  margin: const EdgeInsets.only(top: 16),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFF79009).withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(12)),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.straighten_rounded, size: 18, color: Color(0xFFF79009)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                          'Tailles chinoises : elles taillent petit. Prends 1 à 2 tailles au-dessus de ta taille habituelle.',
+                          style: TextStyle(color: AppColors.label, fontSize: 13, height: 1.35)),
+                    ),
+                  ]),
+                ),
+              const SizedBox(height: 18),
+              Row(children: [
+                Text('Quantité', style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w800, fontSize: 15)),
+                const Spacer(),
+                Container(
+                  decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: AppColors.border)),
+                  child: Row(children: [
+                    IconButton(
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _qty > 1 ? () => setState(() => _qty--) : null,
+                        icon: Icon(Icons.remove_rounded, color: AppColors.label)),
+                    Text('$_qty',
+                        style: TextStyle(color: AppColors.label, fontSize: 16, fontWeight: FontWeight.w800)),
+                    IconButton(
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _qty < 10 ? () => setState(() => _qty++) : null,
+                        icon: Icon(Icons.add_rounded, color: AppColors.label)),
+                  ]),
+                ),
+              ]),
+              const SizedBox(height: 28),
+            ]),
           ),
+        ]),
+      ),
+      Container(
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          border: Border(top: BorderSide(color: AppColors.border)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Row(children: [
+              Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Total', style: TextStyle(color: AppColors.hint, fontSize: 11.5)),
+                Text(v == null ? '—' : _usd((v['priceUsd'] as num) * _qty),
+                    style: TextStyle(color: AppColors.label, fontSize: 19, fontWeight: FontWeight.w900)),
+              ]),
+              const SizedBox(width: 16),
+              Expanded(
+                child: _GradButton(
+                    label: v == null ? 'Indisponible' : 'Ajouter au panier', onTap: v == null ? null : _add),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    ]);
+  }
+}
+
+class _Perk extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _Perk({required this.icon, required this.text});
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Column(children: [
+          Icon(icon, size: 22, color: const Color(0xFF8B5CF6)),
+          const SizedBox(height: 6),
+          Text(text,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.sublabel, fontSize: 11.5, height: 1.25, fontWeight: FontWeight.w600)),
+        ]),
+      );
+}
+
+// ── Panier + paiement avec le solde ──────────────────────────────────────
+const List<String> kWilayas = [
+  'Adrar', 'Chlef', 'Laghouat', 'Oum El Bouaghi', 'Batna', 'Béjaïa', 'Biskra', 'Béchar', 'Blida', 'Bouira',
+  'Tamanrasset', 'Tébessa', 'Tlemcen', 'Tiaret', 'Tizi Ouzou', 'Alger', 'Djelfa', 'Jijel', 'Sétif', 'Saïda',
+  'Skikda', 'Sidi Bel Abbès', 'Annaba', 'Guelma', 'Constantine', 'Médéa', 'Mostaganem', "M'Sila", 'Mascara',
+  'Ouargla', 'Oran', 'El Bayadh', 'Illizi', 'Bordj Bou Arréridj', 'Boumerdès', 'El Tarf', 'Tindouf',
+  'Tissemsilt', 'El Oued', 'Khenchela', 'Souk Ahras', 'Tipaza', 'Mila', 'Aïn Defla', 'Naâma',
+  'Aïn Témouchent', 'Ghardaïa', 'Relizane', 'Timimoun', 'Bordj Badji Mokhtar', 'Ouled Djellal', 'Béni Abbès',
+  'In Salah', 'In Guezzam', 'Touggourt', 'Djanet', "El M'Ghair", 'El Meniaa',
+];
+
+class CartScreen extends StatefulWidget {
+  const CartScreen({super.key});
+  @override
+  State<CartScreen> createState() => _CartScreenState();
+}
+
+class _CartScreenState extends State<CartScreen> {
+  final _name = TextEditingController(text: UserProfile.name);
+  final _phone = TextEditingController(text: UserProfile.phone);
+  final _commune = TextEditingController();
+  final _address = TextEditingController();
+  String? _wilaya;
+  double? _balance;
+  bool _busy = false;
+  String _idem = _idemKey(); // one key per checkout attempt: a double tap pays once
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshBalance();
+  }
+
+  Future<void> _refreshBalance() async {
+    if (!ShopApi.loggedIn) return;
+    try {
+      final d = await ShopApi.me();
+      if (mounted) setState(() => _balance = (d['balanceUsd'] as num).toDouble());
+    } catch (_) {}
+  }
+
+  bool get _formOk =>
+      _name.text.trim().isNotEmpty && _phone.text.trim().length >= 9 && _wilaya != null;
+
+  Future<void> _pay() async {
+    if (!ShopApi.loggedIn) {
+      if (!await showWalletLogin(context)) return;
+      await _refreshBalance();
+    }
+    setState(() => _busy = true);
+    try {
+      final d = await ShopApi.placeOrder(Cart.lines.value, {
+        'fullName': _name.text.trim(),
+        'phone': _phone.text.trim(),
+        'wilaya': _wilaya!,
+        'commune': _commune.text.trim(),
+        'address': _address.text.trim(),
+      }, _idem);
+      Cart.clear();
+      _idem = _idemKey();
+      if (!mounted) return;
+      await showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: Text('Commande #${d['orderId']} payée',
+              style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w800)),
+          content: Text(
+              'Nous achetons tes articles chez le fournisseur. Suis ta commande dans « Mon solde → Mes commandes ».\n\n'
+              'Solde restant : ${_usd(d['balanceUsd'] as num)}',
+              style: TextStyle(color: AppColors.sublabel)),
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+        ),
+      );
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const OrdersScreen()));
+      }
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      if (e.status == 402) {
+        final missing = (e.body['totalUsd'] as num) - (e.body['balanceUsd'] as num);
+        _toast(context, 'Solde insuffisant : il te manque ${_usd(missing)}. Paie ton agent en dinars pour recharger.',
+            error: true);
+        _refreshBalance();
+      } else if (e.status == 401) {
+        _toast(context, 'Session expirée, reconnecte-toi.', error: true);
+      } else {
+        _toast(context, e.message, error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      appBar: AppBar(
+          backgroundColor: AppColors.bg, foregroundColor: AppColors.label, elevation: 0,
+          title: const Text('Mon panier')),
+      body: ValueListenableBuilder<List<CartLine>>(
+        valueListenable: Cart.lines,
+        builder: (_, lines, __) {
+          if (lines.isEmpty) {
+            return Center(
+                child: Text('Ton panier est vide', style: TextStyle(color: AppColors.sublabel, fontSize: 16)));
+          }
+          return ListView(padding: const EdgeInsets.all(16), children: [
+            for (final l in lines)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(14)),
+                child: Row(children: [
+                  ClipRRect(borderRadius: BorderRadius.circular(10),
+                      child: SizedBox(width: 70, height: 70, child: _netImage(l.image))),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(l.title, maxLines: 2, overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w600)),
+                    Text(l.variantLabel, style: TextStyle(color: AppColors.sublabel, fontSize: 12)),
+                    Text(_usd(l.unitUsd * l.qty),
+                        style: const TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.w800)),
+                  ])),
+                  Column(children: [
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      IconButton(visualDensity: VisualDensity.compact,
+                          onPressed: () => Cart.setQty(l, l.qty - 1),
+                          icon: Icon(Icons.remove, color: AppColors.label, size: 18)),
+                      Text('${l.qty}', style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w700)),
+                      IconButton(visualDensity: VisualDensity.compact,
+                          onPressed: () => Cart.setQty(l, l.qty + 1),
+                          icon: Icon(Icons.add, color: AppColors.label, size: 18)),
+                    ]),
+                  ]),
+                ]),
+              ),
+            const SizedBox(height: 8),
+            Text('Livraison', style: TextStyle(color: AppColors.label, fontSize: 17, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 10),
+            TextField(controller: _name, onChanged: (_) => setState(() {}),
+                style: TextStyle(color: AppColors.inputFg), decoration: _field('Nom et prénom')),
+            const SizedBox(height: 10),
+            TextField(controller: _phone, keyboardType: TextInputType.phone, onChanged: (_) => setState(() {}),
+                style: TextStyle(color: AppColors.inputFg), decoration: _field('Téléphone pour le livreur')),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              // `value`, not `initialValue`: CI's Flutter predates initialValue.
+              // ignore: deprecated_member_use
+              value: _wilaya,
+              isExpanded: true,
+              dropdownColor: AppColors.surface,
+              style: TextStyle(color: AppColors.inputFg),
+              decoration: _field('Wilaya'),
+              items: [
+                for (var i = 0; i < kWilayas.length; i++)
+                  DropdownMenuItem(value: kWilayas[i], child: Text('${i + 1} — ${kWilayas[i]}')),
+              ],
+              onChanged: (v) => setState(() => _wilaya = v),
+            ),
+            const SizedBox(height: 10),
+            TextField(controller: _commune, style: TextStyle(color: AppColors.inputFg), decoration: _field('Commune')),
+            const SizedBox(height: 10),
+            TextField(controller: _address, style: TextStyle(color: AppColors.inputFg),
+                decoration: _field('Adresse (rue, quartier, point de repère)')),
+            const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(14)),
+              child: Column(children: [
+                Row(children: [
+                  Text('Total', style: TextStyle(color: AppColors.label, fontSize: 16, fontWeight: FontWeight.w700)),
+                  const Spacer(),
+                  Text(_usd(Cart.total),
+                      style: TextStyle(color: AppColors.label, fontSize: 20, fontWeight: FontWeight.w900)),
+                ]),
+                const SizedBox(height: 4),
+                Row(children: [
+                  Text('Mon solde', style: TextStyle(color: AppColors.sublabel)),
+                  const Spacer(),
+                  Text(_balance == null ? (ShopApi.loggedIn ? '…' : 'non connecté') : _usd(_balance!),
+                      style: TextStyle(
+                          color: _balance != null && _balance! < Cart.total
+                              ? const Color(0xFFF97066)
+                              : AppColors.sublabel,
+                          fontWeight: FontWeight.w600)),
+                ]),
+              ]),
+            ),
+            const SizedBox(height: 16),
+            _GradButton(
+                label: 'Payer ${_usd(Cart.total)} avec mon solde', busy: _busy, onTap: _formOk ? _pay : null),
+            const SizedBox(height: 8),
+            Text('Livraison en Algérie et douane comprises. Délai indicatif : 2 à 4 semaines.',
+                textAlign: TextAlign.center, style: TextStyle(color: AppColors.hint, fontSize: 12)),
+            const SizedBox(height: 30),
+          ]);
+        },
+      ),
+    );
+  }
+}
+
+// ── Onglet Solde ─────────────────────────────────────────────────────────
+class WalletScreen extends StatefulWidget {
+  const WalletScreen({super.key});
+  @override
+  State<WalletScreen> createState() => _WalletScreenState();
+}
+
+class _WalletScreenState extends State<WalletScreen> {
+  Map<String, dynamic>? _me;
+  String? _err;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (!ShopApi.loggedIn) {
+      setState(() => _me = null);
+      return;
+    }
+    setState(() { _loading = true; _err = null; });
+    try {
+      final d = await ShopApi.me();
+      if (mounted) setState(() => _me = d);
+    } on ApiError catch (e) {
+      if (mounted) setState(() => _err = e.message);
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  static const _kinds = {
+    'agent_credit': ('Recharge par ton agent', Icons.south_west_rounded, Color(0xFF12B76A)),
+    'purchase': ('Achat boutique', Icons.shopping_bag_outlined, Color(0xFFF97066)),
+    'refund': ('Remboursement', Icons.undo_rounded, Color(0xFF12B76A)),
+    'adjust': ('Correction', Icons.tune_rounded, Color(0xFF8B5CF6)),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        bottom: false,
+        child: !ShopApi.loggedIn
+            ? _loginPrompt()
+            : RefreshIndicator(
+                onRefresh: _load,
+                child: ListView(padding: const EdgeInsets.fromLTRB(20, 16, 20, 120), children: [
+                  Text('Mon solde',
+                      style: TextStyle(color: AppColors.label, fontSize: 28, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.all(22),
+                    decoration: BoxDecoration(gradient: _kShopGrad, borderRadius: BorderRadius.circular(22)),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('SOLDE DISPONIBLE',
+                          style: TextStyle(color: Colors.white70, fontSize: 12, letterSpacing: 1.2,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 6),
+                      Text(_me == null ? (_loading ? '…' : '—') : _usd(_me!['balanceUsd'] as num),
+                          style: const TextStyle(color: Colors.white, fontSize: 38, fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 6),
+                      Text('${_me?['phone'] ?? ''}', style: const TextStyle(color: Colors.white70)),
+                    ]),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(14)),
+                    child: Text(
+                        'Pour recharger : paie ton agent Tchipa en dinars (BaridiMob). Il crédite ton solde en dollars, '
+                        'et tu achètes dans la boutique.',
+                        style: TextStyle(color: AppColors.sublabel, fontSize: 13.5)),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () =>
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => const OrdersScreen())),
+                        icon: const Icon(Icons.local_shipping_outlined),
+                        label: const Text('Mes commandes'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => launchUrl(Uri.parse(kAgentTelegram), mode: LaunchMode.externalApplication),
+                        icon: const Icon(Icons.support_agent_rounded),
+                        label: const Text('Mon agent'),
+                      ),
+                    ),
+                  ]),
+                  if (_err != null)
+                    Padding(padding: const EdgeInsets.only(top: 12),
+                        child: Text(_err!, style: const TextStyle(color: Color(0xFFF97066)))),
+                  const SizedBox(height: 20),
+                  Text('Historique',
+                      style: TextStyle(color: AppColors.label, fontSize: 17, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 8),
+                  if ((_me?['history'] as List? ?? []).isEmpty)
+                    Text('Aucune opération pour le moment.', style: TextStyle(color: AppColors.sublabel)),
+                  for (final h in (_me?['history'] as List? ?? [])) _historyRow(h as Map<String, dynamic>),
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: () async {
+                      await ShopApi.logout();
+                      if (mounted) setState(() => _me = null);
+                    },
+                    child: Text('Se déconnecter', style: TextStyle(color: AppColors.hint)),
+                  ),
+                ]),
+              ),
+      ),
+    );
+  }
+
+  Widget _historyRow(Map<String, dynamic> h) {
+    final k = _kinds[h['kind']] ?? ('Opération', Icons.swap_horiz_rounded, const Color(0xFF8B5CF6));
+    final amt = (h['amountUsd'] as num).toDouble();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(12)),
+      child: Row(children: [
+        CircleAvatar(radius: 18, backgroundColor: k.$3.withValues(alpha: 0.15), child: Icon(k.$2, color: k.$3, size: 18)),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(k.$1, style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w600)),
+          Text('${h['ref'] ?? ''} ${(h['at'] ?? '').toString().replaceFirst('T', ' ')}'.trim(),
+              style: TextStyle(color: AppColors.hint, fontSize: 12)),
+        ])),
+        Text('${amt >= 0 ? '+' : ''}${_usd(amt)}',
+            style: TextStyle(color: amt >= 0 ? const Color(0xFF12B76A) : AppColors.label,
+                fontWeight: FontWeight.w800)),
+      ]),
+    );
+  }
+
+  Widget _loginPrompt() => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+          Icon(Icons.account_balance_wallet_rounded, size: 64, color: AppColors.hint),
+          const SizedBox(height: 16),
+          Text('Mon solde Tchipa', textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.label, fontSize: 24, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text('Ton argent en dollars pour acheter dans la boutique. Ton agent le recharge quand tu le paies en dinars.',
+              textAlign: TextAlign.center, style: TextStyle(color: AppColors.sublabel)),
+          const SizedBox(height: 24),
+          _GradButton(
+              label: 'Me connecter avec mon PIN',
+              onTap: () async {
+                if (await showWalletLogin(context)) _load();
+              }),
+        ]),
+      );
+}
+
+// ── Mes commandes ────────────────────────────────────────────────────────
+const Map<String, (String, Color)> kOrderStatus = {
+  'payee': ('Payée — en préparation', Color(0xFF00D4FF)),
+  'achetee': ('Achetée chez le fournisseur', Color(0xFF8B5CF6)),
+  'entrepot': ('À l\'entrepôt en Chine', Color(0xFF8B5CF6)),
+  'expediee': ('Expédiée vers l\'Algérie', Color(0xFFF79009)),
+  'livree': ('Livrée', Color(0xFF12B76A)),
+  'annulee': ('Annulée — remboursée', Color(0xFFF97066)),
+};
+
+class OrdersScreen extends StatefulWidget {
+  const OrdersScreen({super.key});
+  @override
+  State<OrdersScreen> createState() => _OrdersScreenState();
+}
+
+class _OrdersScreenState extends State<OrdersScreen> {
+  List<dynamic>? _orders;
+  String? _err;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final o = await ShopApi.myOrders();
+      if (mounted) setState(() => _orders = o);
+    } on ApiError catch (e) {
+      if (mounted) setState(() => _err = e.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      appBar: AppBar(
+          backgroundColor: AppColors.bg, foregroundColor: AppColors.label, elevation: 0,
+          title: const Text('Mes commandes')),
+      body: _orders == null
+          ? Center(child: _err != null
+              ? Text(_err!, style: TextStyle(color: AppColors.sublabel))
+              : const CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: _orders!.isEmpty
+                  ? ListView(children: [
+                      const SizedBox(height: 120),
+                      Center(child: Text('Pas encore de commande', style: TextStyle(color: AppColors.sublabel))),
+                    ])
+                  : ListView(padding: const EdgeInsets.all(16), children: [
+                      for (final o in _orders!) _order(o as Map<String, dynamic>),
+                    ]),
+            ),
+    );
+  }
+
+  Widget _order(Map<String, dynamic> o) {
+    final st = kOrderStatus[o['status']] ?? ('${o['status']}', AppColors.hint);
+    final items = (o['items'] as List?) ?? [];
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text('Commande #${o['id']}', style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w800)),
+          const Spacer(),
+          Text(_usd(o['totalUsd'] as num), style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w800)),
+        ]),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(color: st.$2.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+          child: Text(st.$1, style: TextStyle(color: st.$2, fontWeight: FontWeight.w700, fontSize: 12.5)),
+        ),
+        if (o['tracking'] != null)
+          Padding(padding: const EdgeInsets.only(top: 6),
+              child: Text('Suivi : ${o['tracking']}', style: TextStyle(color: AppColors.sublabel))),
+        const SizedBox(height: 10),
+        for (final it in items)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(children: [
+              ClipRRect(borderRadius: BorderRadius.circular(8),
+                  child: SizedBox(width: 44, height: 44, child: _netImage(it['image'] as String?))),
+              const SizedBox(width: 10),
+              Expanded(child: Text('${it['qty']} × ${it['title']}', maxLines: 2, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: AppColors.sublabel, fontSize: 13))),
+            ]),
+          ),
+      ]),
+    );
+  }
+}
+
+// ── Espace agent : créditer le solde d'un client ─────────────────────────
+// Replaces the shared PIN 1234 for money operations: each agent has a personal
+// code (created by Tarik via POST /admin/agents). Agents are prepaid: they pay
+// Tarik first, Tarik loads their provision, and each client credit is taken
+// from it — the server refuses a credit larger than the remaining provision.
+class AgentWalletScreen extends StatefulWidget {
+  const AgentWalletScreen({super.key});
+  @override
+  State<AgentWalletScreen> createState() => _AgentWalletScreenState();
+}
+
+class _AgentWalletScreenState extends State<AgentWalletScreen> {
+  final _code = TextEditingController();
+  final _phone = TextEditingController();
+  final _amount = TextEditingController();
+  final _dzd = TextEditingController();
+  final _ref = TextEditingController();
+  Map<String, dynamic>? _me;
+  List<dynamic> _credits = [];
+  bool _busy = false;
+  String? _err;
+  String _idem = _idemKey();
+
+  @override
+  void initState() {
+    super.initState();
+    if (ShopApi.agentToken != null) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final me = await ShopApi.agentMe();
+      final c = await ShopApi.agentCredits();
+      if (mounted) setState(() { _me = me; _credits = c; _err = null; });
+    } on ApiError catch (e) {
+      if (e.status == 401) {
+        await ShopApi.setAgentToken(null);
+        if (mounted) setState(() { _me = null; _err = 'Code agent refusé ou désactivé.'; });
+      } else if (mounted) {
+        setState(() => _err = e.message);
+      }
+    }
+  }
+
+  Future<void> _saveCode() async {
+    final t = _code.text.trim();
+    setState(() { _busy = true; _err = null; });
+    try {
+      await ShopApi.agentMe(t);
+      await ShopApi.setAgentToken(t);
+      _code.clear();
+      await _refresh();
+    } on ApiError catch (e) {
+      setState(() => _err = e.status == 401 ? 'Code agent invalide.' : e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _credit() async {
+    final amount = _amount.text.trim().replaceAll(',', '.');
+    final phone = _phone.text.trim();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Text('Confirmer le crédit', style: TextStyle(color: AppColors.label)),
+        content: Text('Créditer $amount \$ sur le solde du $phone ?\n\nVérifie bien le numéro : '
+            'l\'argent ira sur ce compte.', style: TextStyle(color: AppColors.sublabel)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Créditer')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() { _busy = true; _err = null; });
+    try {
+      await ShopApi.agentCredit(
+          phone: phone,
+          amount: amount,
+          dzd: int.tryParse(_dzd.text.replaceAll(RegExp(r'\s'), '')),
+          ref: _ref.text.trim(),
+          idem: _idem);
+      _idem = _idemKey();
+      _phone.clear(); _amount.clear(); _dzd.clear(); _ref.clear();
+      if (mounted) _toast(context, 'Crédit de $amount \$ envoyé sur $phone');
+      await _refresh();
+    } on ApiError catch (e) {
+      // Same key is kept: retrying after a network error credits once.
+      if (mounted) setState(() => _err = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      appBar: AppBar(
+        backgroundColor: AppColors.bg, foregroundColor: AppColors.label, elevation: 0,
+        title: const Text('Espace agent'),
+        actions: [
+          if (ShopApi.agentToken != null)
+            IconButton(
+              tooltip: 'Oublier mon code',
+              onPressed: () async {
+                await ShopApi.setAgentToken(null);
+                setState(() => _me = null);
+              },
+              icon: const Icon(Icons.logout_rounded),
+            ),
+        ],
+      ),
+      body: ListView(padding: const EdgeInsets.all(20), children: [
+        if (ShopApi.agentToken == null) ...[
+          Text('Entre ton code agent personnel (donné par Tchipa).',
+              style: TextStyle(color: AppColors.sublabel)),
+          const SizedBox(height: 12),
+          TextField(controller: _code, style: TextStyle(color: AppColors.inputFg),
+              decoration: _field('Code agent', hint: 'agt_…', icon: Icons.key_rounded)),
+          const SizedBox(height: 12),
+          _GradButton(label: 'Valider', busy: _busy, onTap: _saveCode),
+        ] else ...[
+          if (_me != null)
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(16)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('${_me!['name']}', style: TextStyle(color: AppColors.label, fontSize: 18, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 6),
+                Text('Ma provision : ${_usd(_me!['availableUsd'] as num)}',
+                    style: const TextStyle(color: Color(0xFF12B76A), fontSize: 16, fontWeight: FontWeight.w700)),
+                Text('Chaque crédit client est pris sur ta provision. Pour la recharger, paie Tchipa.',
+                    style: TextStyle(color: AppColors.sublabel, fontSize: 12.5)),
+              ]),
+            ),
+          const SizedBox(height: 18),
+          Text('Créditer un client', style: TextStyle(color: AppColors.label, fontSize: 17, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
+          TextField(controller: _phone, keyboardType: TextInputType.phone, onChanged: (_) => setState(() {}),
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('Téléphone du client', icon: Icons.phone_rounded)),
+          const SizedBox(height: 10),
+          TextField(controller: _amount, keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('Montant en dollars', hint: '25.00', icon: Icons.attach_money_rounded)),
+          const SizedBox(height: 10),
+          TextField(controller: _dzd, keyboardType: TextInputType.number,
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('Dinars reçus (facultatif)', icon: Icons.payments_outlined)),
+          const SizedBox(height: 10),
+          TextField(controller: _ref,
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('Référence BaridiMob (facultatif)', icon: Icons.receipt_outlined)),
+          if (_err != null)
+            Padding(padding: const EdgeInsets.only(top: 10),
+                child: Text(_err!, style: const TextStyle(color: Color(0xFFF97066)))),
+          const SizedBox(height: 14),
+          _GradButton(
+              label: 'Créditer',
+              busy: _busy,
+              onTap: _phone.text.trim().length >= 9 && _amount.text.trim().isNotEmpty ? _credit : null),
+          const SizedBox(height: 22),
+          Text('Mes derniers crédits', style: TextStyle(color: AppColors.label, fontSize: 17, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          if (_credits.isEmpty) Text('Aucun crédit pour le moment.', style: TextStyle(color: AppColors.sublabel)),
+          for (final c in _credits)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text('${c['phone']}', style: TextStyle(color: AppColors.label)),
+              subtitle: Text('${c['at']}${c['ref'] != null ? ' · ${c['ref']}' : ''}',
+                  style: TextStyle(color: AppColors.hint, fontSize: 12)),
+              trailing: Text('+${_usd(c['amountUsd'] as num)}',
+                  style: const TextStyle(color: Color(0xFF12B76A), fontWeight: FontWeight.w800)),
+            ),
+        ],
+        if (ShopApi.agentToken == null && _err != null)
+          Padding(padding: const EdgeInsets.only(top: 10),
+              child: Text(_err!, style: const TextStyle(color: Color(0xFFF97066)))),
       ]),
     );
   }
