@@ -1844,6 +1844,9 @@ class ShopApi {
     await _save(_agentKey, t);
   }
 
+  static Future<String> agentActivate(String phone, String pin) async =>
+      (await _req('POST', '/agent/activate', body: {'phone': phone, 'pin': pin}))['token'] as String;
+
   static Future<Map<String, dynamic>> agentCredit(
           {required String phone,
           required String amount,
@@ -3650,7 +3653,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
 // ── Espace agent : créditer le solde d'un client ─────────────────────────
 // Replaces the shared PIN 1234 for money operations: each agent has a personal
-// code (created by Tarik via POST /admin/agents). Agents are prepaid: they pay
+// code (created by Tarik via POST /admin/agents). The agent never sees it: they
+// type their phone + the one-time 4-digit PIN Tarik gave them, and the app
+// receives the code from POST /agent/activate and keeps it. Agents are prepaid: they pay
 // Tarik first, Tarik loads their provision, and each client credit is taken
 // from it — the server refuses a credit larger than the remaining provision.
 class AgentWalletScreen extends StatefulWidget {
@@ -3660,7 +3665,8 @@ class AgentWalletScreen extends StatefulWidget {
 }
 
 class _AgentWalletScreenState extends State<AgentWalletScreen> {
-  final _code = TextEditingController();
+  final _actPhone = TextEditingController();
+  final _pin = TextEditingController();
   final _phone = TextEditingController();
   final _amount = TextEditingController();
   final _dzd = TextEditingController();
@@ -3685,23 +3691,22 @@ class _AgentWalletScreenState extends State<AgentWalletScreen> {
     } on ApiError catch (e) {
       if (e.status == 401) {
         await ShopApi.setAgentToken(null);
-        if (mounted) setState(() { _me = null; _err = 'Code agent refusé ou désactivé.'; });
+        if (mounted) setState(() { _me = null; _err = 'Accès agent désactivé. Demande un nouveau PIN à Tchipa.'; });
       } else if (mounted) {
         setState(() => _err = e.message);
       }
     }
   }
 
-  Future<void> _saveCode() async {
-    final t = _code.text.trim();
+  Future<void> _activate() async {
     setState(() { _busy = true; _err = null; });
     try {
-      await ShopApi.agentMe(t);
+      final t = await ShopApi.agentActivate(_actPhone.text.trim(), _pin.text.trim());
       await ShopApi.setAgentToken(t);
-      _code.clear();
+      _actPhone.clear(); _pin.clear();
       await _refresh();
     } on ApiError catch (e) {
-      setState(() => _err = e.status == 401 ? 'Code agent invalide.' : e.message);
+      setState(() => _err = e.message);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -3754,7 +3759,7 @@ class _AgentWalletScreenState extends State<AgentWalletScreen> {
         actions: [
           if (ShopApi.agentToken != null)
             IconButton(
-              tooltip: 'Oublier mon code',
+              tooltip: 'Déconnecter ce téléphone',
               onPressed: () async {
                 await ShopApi.setAgentToken(null);
                 setState(() => _me = null);
@@ -3765,13 +3770,21 @@ class _AgentWalletScreenState extends State<AgentWalletScreen> {
       ),
       body: ListView(padding: const EdgeInsets.all(20), children: [
         if (ShopApi.agentToken == null) ...[
-          Text('Entre ton code agent personnel (donné par Tchipa).',
+          Text('Entre ton numéro et le PIN à 4 chiffres donné par Tchipa. '
+              'Le PIN ne sert qu\'une fois et expire au bout de 48 h.',
               style: TextStyle(color: AppColors.sublabel)),
           const SizedBox(height: 12),
-          TextField(controller: _code, style: TextStyle(color: AppColors.inputFg),
-              decoration: _field('Code agent', hint: 'agt_…', icon: Icons.key_rounded)),
+          TextField(controller: _actPhone, keyboardType: TextInputType.phone, onChanged: (_) => setState(() {}),
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('Mon téléphone', icon: Icons.phone_rounded)),
+          const SizedBox(height: 10),
+          TextField(controller: _pin, keyboardType: TextInputType.number, maxLength: 4, obscureText: true,
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(color: AppColors.inputFg), decoration: _field('PIN agent', hint: '••••', icon: Icons.key_rounded)),
           const SizedBox(height: 12),
-          _GradButton(label: 'Valider', busy: _busy, onTap: _saveCode),
+          _GradButton(
+              label: 'Activer',
+              busy: _busy,
+              onTap: _actPhone.text.trim().length >= 9 && _pin.text.trim().length == 4 ? _activate : null),
         ] else ...[
           if (_me != null)
             Container(
