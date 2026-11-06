@@ -279,7 +279,7 @@ class PinSetup {
           title: const Text('Vérifie ton email'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             Icon(Icons.mark_email_unread_rounded,
-                color: const Color(0xFF00D4FF), size: 48),
+                color: const Color(0xFFFF6A00), size: 48),
             const SizedBox(height: 12),
             Text(
               'On t\'a envoyé un lien à\n$email\n\nClique-le, puis reviens ici.',
@@ -397,7 +397,7 @@ class PinApi {
   }
 }
 
-final ValueNotifier<bool>   darkModeNotifier = ValueNotifier(true);
+final ValueNotifier<bool>   darkModeNotifier = ValueNotifier(false);
 final ValueNotifier<String> langNotifier     = ValueNotifier('fr');
 
 class AppSettings {
@@ -406,7 +406,7 @@ class AppSettings {
 
   static Future<void> load() async {
     final p = await SharedPreferences.getInstance();
-    darkModeNotifier.value = p.getBool(_kDark) ?? true;
+    darkModeNotifier.value = p.getBool(_kDark) ?? false;
     langNotifier.value     = p.getString(_kLang) ?? 'fr';
     AppColors.update(darkModeNotifier.value);
   }
@@ -460,18 +460,19 @@ class AppColors {
       inputFg  = Colors.white;
       navUnsel = Colors.white38;
     } else {
-      bg       = const Color(0xFFF0F5FF);
+      // Clair (defaut, 2026-11-06) : blanc facon AliExpress/Temu, bords orange pale
+      bg       = const Color(0xFFF6F6F6);
       surface  = const Color(0xFFFFFFFF);
-      card     = const Color(0xFFEAF0FB);
-      text     = const Color(0xFF0D1117);
-      textSub  = const Color(0xFF334155);
-      textDim  = const Color(0xFF64748B);
-      border   = const Color(0xFFD1DCF0);
-      label    = const Color(0xFF0D1117);
-      sublabel = const Color(0xFF334155);
-      hint     = const Color(0xFF94A3B8);
-      inputFg  = const Color(0xFF0D1117);
-      navUnsel = const Color(0xFF64748B);
+      card     = const Color(0xFFFFF4EC);
+      text     = const Color(0xFF1A1A1A);
+      textSub  = const Color(0xFF4B5563);
+      textDim  = const Color(0xFF6B7280);
+      border   = const Color(0xFFFFD3B5);
+      label    = const Color(0xFF1A1A1A);
+      sublabel = const Color(0xFF4B5563);
+      hint     = const Color(0xFF9CA3AF);
+      inputFg  = const Color(0xFF1A1A1A);
+      navUnsel = const Color(0xFF6B7280);
     }
   }
 }
@@ -756,23 +757,23 @@ class _LockScreenState extends State<LockScreen> {
             Container(
               width: 80, height: 80,
               decoration: BoxDecoration(
-                gradient: const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]),
+                gradient: const LinearGradient(colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)]),
                 borderRadius: BorderRadius.circular(22),
               ),
               child: const Center(
-                child: Text('T', style: TextStyle(color: Colors.black, fontSize: 40,
+                child: Text('T', style: TextStyle(color: Colors.white, fontSize: 40,
                     fontWeight: FontWeight.bold)),
               ),
             ),
             const SizedBox(height: 32),
-            const Text('Tchipa', style: TextStyle(color: Colors.white, fontSize: 28,
+            Text('Tchipa', style: TextStyle(color: AppColors.text, fontSize: 28,
                 fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             Text('Veuillez vous authentifier',
-                style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 14)),
+                style: TextStyle(color: AppColors.textSub, fontSize: 14)),
             const SizedBox(height: 40),
             if (_loading)
-              const CircularProgressIndicator(color: Color(0xFF00D4FF))
+              const CircularProgressIndicator(color: Color(0xFFFF6A00))
             else ...[
               if (_error != null) ...[
                 Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
@@ -783,15 +784,15 @@ class _LockScreenState extends State<LockScreen> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
                   decoration: BoxDecoration(
-                    gradient: const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]),
+                    gradient: const LinearGradient(colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)]),
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.fingerprint_rounded, color: Colors.black, size: 22),
+                      Icon(Icons.fingerprint_rounded, color: Colors.white, size: 22),
                       SizedBox(width: 10),
-                      Text('S\'authentifier', style: TextStyle(color: Colors.black,
+                      Text('S\'authentifier', style: TextStyle(color: Colors.white,
                           fontWeight: FontWeight.bold, fontSize: 15)),
                     ],
                   ),
@@ -825,10 +826,10 @@ class TchipaApp extends StatelessWidget {
     return ThemeData(
       brightness: brightness,
       scaffoldBackgroundColor: AppColors.bg,
-      primaryColor: const Color(0xFF00D4FF),
+      primaryColor: const Color(0xFFFF6A00),
       cardColor: AppColors.surface,
       colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF00D4FF),
+        seedColor: const Color(0xFFFF6A00),
         brightness: brightness,
         surface: AppColors.surface,
         onSurface: AppColors.text,
@@ -843,7 +844,7 @@ class TchipaApp extends StatelessWidget {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Color(0xFF00D4FF)),
+          borderSide: const BorderSide(color: Color(0xFFFF6A00)),
         ),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
@@ -995,12 +996,12 @@ class _SplashScreenState extends State<SplashScreen>
                             shape: BoxShape.circle,
                             boxShadow: [
                               BoxShadow(
-                                color: Color(0x5900D4FF),
+                                color: Color(0x59FF6A00),
                                 blurRadius: 40,
                                 spreadRadius: 8,
                               ),
                               BoxShadow(
-                                color: Color(0x338B5CF6),
+                                color: Color(0x33FF3D1F),
                                 blurRadius: 60,
                                 spreadRadius: 4,
                               ),
@@ -1047,7 +1048,7 @@ class _SplashScreenState extends State<SplashScreen>
                 children: [
                   ShaderMask(
                     shaderCallback: (b) => const LinearGradient(
-                      colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
+                      colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)],
                     ).createShader(b),
                     child: const Text('tchipa',
                         style: TextStyle(
@@ -1072,7 +1073,7 @@ class _SplashScreenState extends State<SplashScreen>
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
                       valueColor: AlwaysStoppedAnimation<Color>(
-                          const Color(0xFF00D4FF)
+                          const Color(0xFFFF6A00)
                               .withValues(alpha: 0.8)),
                     ),
                   ),
@@ -1114,7 +1115,7 @@ class _MainScreenState extends State<MainScreen> {
         setState(() => _idx = 3);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Row(children: [
-            const Icon(Icons.person_outline, color: Color(0xFF00D4FF)),
+            const Icon(Icons.person_outline, color: Color(0xFFFF6A00)),
             const SizedBox(width: 10),
             Text('Complétez votre profil pour commencer',
                 style: TextStyle(color: AppColors.label)),
@@ -1188,7 +1189,7 @@ class _NavPill extends StatelessWidget {
         padding: EdgeInsets.symmetric(horizontal: sel ? 18 : 14, vertical: 8),
         decoration: BoxDecoration(
           gradient: sel ? const LinearGradient(
-            colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)],
+            colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)],
           ) : null,
           borderRadius: BorderRadius.circular(20),
         ),
@@ -1254,11 +1255,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _saving = false);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Row(children: [
-        Icon(Icons.check_circle_rounded, color: Color(0xFF00D4FF)),
+      content: Row(children: [
+        const Icon(Icons.check_circle_rounded, color: Color(0xFFFF6A00)),
         SizedBox(width: 10),
         Text('Profil enregistré',
-            style: TextStyle(color: Colors.white)),
+            style: TextStyle(color: AppColors.text)),
       ]),
       backgroundColor: AppColors.surface,
       behavior: SnackBarBehavior.floating,
@@ -1306,13 +1307,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   decoration: const BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: LinearGradient(colors: [
-                      Color(0xFF00D4FF), Color(0xFF8B5CF6)
+                      Color(0xFFFF6A00), Color(0xFFFF3D1F)
                     ]),
                   ),
                   child: Center(
                     child: Text(initial,
                         style: const TextStyle(
-                            color: Colors.black,
+                            color: Colors.white,
                             fontSize: 30,
                             fontWeight: FontWeight.bold)),
                   ),
@@ -1396,8 +1397,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     await AppSettings.setDark(!v);
                     if (mounted) setState(() {});
                   },
-                  thumbColor: WidgetStateProperty.all(const Color(0xFF00D4FF)),
-                  trackColor: WidgetStateProperty.all(const Color(0xFF00D4FF).withValues(alpha: 0.3)),
+                  thumbColor: WidgetStateProperty.all(const Color(0xFFFF6A00)),
+                  trackColor: WidgetStateProperty.all(const Color(0xFFFF6A00).withValues(alpha: 0.3)),
                 ),
               ),
               // — Biométrique (native only: local_auth has no web plugin, and
@@ -1418,8 +1419,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     await AppLock.setEnabled(v);
                     if (mounted) setState(() => _lockEnabled = v);
                   },
-                  thumbColor: WidgetStateProperty.all(const Color(0xFF00D4FF)),
-                  trackColor: WidgetStateProperty.all(const Color(0xFF00D4FF).withValues(alpha: 0.3)),
+                  thumbColor: WidgetStateProperty.all(const Color(0xFFFF6A00)),
+                  trackColor: WidgetStateProperty.all(const Color(0xFFFF6A00).withValues(alpha: 0.3)),
                 ),
               ),
               ],
@@ -1434,7 +1435,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ? 'PIN vérifié — seul toi peux récupérer les cartes envoyées à ton numéro.'
                     : 'Obligatoire pour recevoir une carte d\'un agent. Email + PIN à 4 chiffres.',
                 trailing: const Icon(Icons.chevron_right_rounded,
-                    color: Color(0xFF00D4FF)),
+                    color: Color(0xFFFF6A00)),
                 onTap: () async {
                   if (UserProfile.phone.trim().isEmpty ||
                       UserProfile.email.trim().isEmpty) {
@@ -1459,19 +1460,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   decoration: BoxDecoration(
                     border: Border.all(
-                        color: const Color(0xFF8B5CF6).withValues(alpha: 0.30)),
+                        color: const Color(0xFFFF3D1F).withValues(alpha: 0.30)),
                     borderRadius: BorderRadius.circular(14),
-                    color: const Color(0xFF8B5CF6).withValues(alpha: 0.06),
+                    color: const Color(0xFFFF3D1F).withValues(alpha: 0.06),
                   ),
                   child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.support_agent_rounded,
-                          color: Color(0xFF8B5CF6), size: 18),
+                          color: Color(0xFFFF3D1F), size: 18),
                       SizedBox(width: 10),
                       Text('Espace agent — créditer un client',
                           style: TextStyle(
-                              color: Color(0xFF8B5CF6),
+                              color: Color(0xFFFF3D1F),
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.5)),
@@ -1507,7 +1508,7 @@ class _SettingsTile extends StatelessWidget {
         border: Border.all(color: AppColors.border),
       ),
       child: Row(children: [
-        Icon(icon, color: const Color(0xFF00D4FF), size: 22),
+        Icon(icon, color: const Color(0xFFFF6A00), size: 22),
         const SizedBox(width: 14),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1544,12 +1545,12 @@ class _LangBtn extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         decoration: BoxDecoration(
           gradient: selected ? const LinearGradient(
-              colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]) : null,
+              colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)]) : null,
           color: selected ? null : AppColors.card,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(label, style: TextStyle(
-            color: selected ? Colors.black : AppColors.textSub,
+            color: selected ? Colors.white : AppColors.textSub,
             fontWeight: FontWeight.bold, fontSize: 13)),
       ),
     );
@@ -1566,7 +1567,7 @@ class _FieldLabel extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: Text(text,
           style: const TextStyle(
-              color: Colors.white54,
+              color: Color(0xFF8A8F98),
               fontSize: 12,
               letterSpacing: 0.5)),
     );
@@ -1622,7 +1623,7 @@ class _ElectricLogoPainter extends CustomPainter {
       final rt = (t + i * 0.2) % 1.0;
       final radius = r0 + rt * (r1 + short * 0.12 - r0);
       final opacity = (1 - rt) * 0.5;
-      ringPaint.color = const Color(0xFF00D4FF).withValues(alpha: opacity);
+      ringPaint.color = const Color(0xFFFF6A00).withValues(alpha: opacity);
       canvas.drawCircle(center, radius, ringPaint);
     }
 
@@ -1637,8 +1638,8 @@ class _ElectricLogoPainter extends CustomPainter {
       final opacity = arcT < 0.5 ? arcT * 2 : (1 - arcT) * 2;
       final isBlue = i % 3 != 0;
       arcPaint.color = (isBlue
-              ? const Color(0xFF00D4FF)
-              : const Color(0xFF8B5CF6))
+              ? const Color(0xFFFF6A00)
+              : const Color(0xFFFF3D1F))
           .withValues(alpha: (opacity * 0.85).clamp(0.0, 1.0));
 
       final pts = arcs[i];
@@ -1654,7 +1655,7 @@ class _ElectricLogoPainter extends CustomPainter {
         tip,
         2.5,
         Paint()
-          ..color = const Color(0xFF00D4FF).withValues(alpha: opacity * 0.9)
+          ..color = const Color(0xFFFF6A00).withValues(alpha: opacity * 0.9)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
       );
     }
@@ -1663,7 +1664,7 @@ class _ElectricLogoPainter extends CustomPainter {
     final orbitPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.7
-      ..color = const Color(0xFF00D4FF).withValues(alpha: 0.18);
+      ..color = const Color(0xFFFF6A00).withValues(alpha: 0.18);
     canvas.drawCircle(center, r0 - 4, orbitPaint);
 
     // ── Orbiting electron dots ──
@@ -1675,11 +1676,11 @@ class _ElectricLogoPainter extends CustomPainter {
         pos,
         4.5,
         Paint()
-          ..color = const Color(0xFF00D4FF).withValues(alpha: 0.3)
+          ..color = const Color(0xFFFF6A00).withValues(alpha: 0.3)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
       );
       canvas.drawCircle(pos, 2.0,
-          Paint()..color = const Color(0xFF00D4FF).withValues(alpha: 0.95));
+          Paint()..color = const Color(0xFFFF6A00).withValues(alpha: 0.95));
       canvas.drawCircle(pos, 0.8,
           Paint()..color = Colors.white.withValues(alpha: 0.9));
     }
@@ -1690,7 +1691,7 @@ class _ElectricLogoPainter extends CustomPainter {
       center,
       r0 * 0.85,
       Paint()
-        ..color = const Color(0xFF00D4FF).withValues(alpha: 0.06 + glow * 0.08)
+        ..color = const Color(0xFFFF6A00).withValues(alpha: 0.06 + glow * 0.08)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24),
     );
   }
@@ -1708,7 +1709,7 @@ class _ElectricLogoPainter extends CustomPainter {
 // The app never sends a price — the server charges the chosen variant's price.
 
 const LinearGradient _kShopGrad =
-    LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF8B5CF6)]);
+    LinearGradient(colors: [Color(0xFFFF6A00), Color(0xFFFF3D1F)]);
 
 String _usd(num v) => '${v.toStringAsFixed(2)} \$';
 
@@ -2227,7 +2228,7 @@ class _ShopScreenState extends State<ShopScreen> {
       body: SafeArea(
         bottom: false,
         child: RefreshIndicator(
-          color: const Color(0xFF8B5CF6),
+          color: const Color(0xFFFF3D1F),
           onRefresh: () async {
             _best = [];
             _cheap = [];
@@ -2296,9 +2297,9 @@ class _ShopScreenState extends State<ShopScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-                color: const Color(0xFF8B5CF6).withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+                color: const Color(0xFFFF3D1F).withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
             child: const Text('Boutique',
-                style: TextStyle(color: Color(0xFF8B5CF6), fontSize: 11, fontWeight: FontWeight.w800)),
+                style: TextStyle(color: Color(0xFFFF3D1F), fontSize: 11, fontWeight: FontWeight.w800)),
           ),
           const Spacer(),
           const _CartButton(),
@@ -2495,7 +2496,7 @@ class _ShopScreenState extends State<ShopScreen> {
                     value: e.key,
                     child: Row(children: [
                       Icon(e.key == _sort ? Icons.radio_button_checked : Icons.radio_button_off,
-                          size: 18, color: e.key == _sort ? const Color(0xFF8B5CF6) : AppColors.hint),
+                          size: 18, color: e.key == _sort ? const Color(0xFFFF3D1F) : AppColors.hint),
                       const SizedBox(width: 10),
                       Text(e.value, style: TextStyle(color: AppColors.label)),
                     ]),
@@ -2571,13 +2572,13 @@ class _PromoCarouselState extends State<_PromoCarousel> {
       Icons.local_shipping_rounded,
       'Livré chez toi en Algérie',
       'Livraison et douane comprises dans le prix affiché.',
-      [Color(0xFF00B4D8), Color(0xFF7C3AED)]
+      [Color(0xFFFF8A00), Color(0xFFE8340C)]
     ),
     (
       Icons.child_care_rounded,
       'Nouveau : Enfants & chaussures',
       'Bébé, fille, garçon — vêtements et chaussures.',
-      [Color(0xFFF472B6), Color(0xFF8B5CF6)]
+      [Color(0xFFF472B6), Color(0xFFFF3D1F)]
     ),
     (
       Icons.account_balance_wallet_rounded,
@@ -3006,7 +3007,7 @@ class _ProductScreenState extends State<ProductScreen> {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                        color: i == _img ? const Color(0xFF8B5CF6) : Colors.transparent, width: 2),
+                        color: i == _img ? const Color(0xFFFF3D1F) : Colors.transparent, width: 2),
                   ),
                   child: _netImage(images[i]),
                 ),
@@ -3078,12 +3079,12 @@ class _ProductScreenState extends State<ProductScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                         decoration: BoxDecoration(
                           color: _sel[e.key] == val
-                              ? const Color(0xFF8B5CF6).withValues(alpha: 0.12)
+                              ? const Color(0xFFFF3D1F).withValues(alpha: 0.12)
                               : AppColors.surface,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
                             width: _sel[e.key] == val ? 1.6 : 1,
-                            color: _sel[e.key] == val ? const Color(0xFF8B5CF6) : AppColors.border,
+                            color: _sel[e.key] == val ? const Color(0xFFFF3D1F) : AppColors.border,
                           ),
                         ),
                         child: Text(val,
@@ -3175,7 +3176,7 @@ class _Perk extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Expanded(
         child: Column(children: [
-          Icon(icon, size: 22, color: const Color(0xFF8B5CF6)),
+          Icon(icon, size: 22, color: const Color(0xFFFF3D1F)),
           const SizedBox(height: 6),
           Text(text,
               textAlign: TextAlign.center,
@@ -3307,7 +3308,7 @@ class _CartScreenState extends State<CartScreen> {
                         style: TextStyle(color: AppColors.label, fontWeight: FontWeight.w600)),
                     Text(l.variantLabel, style: TextStyle(color: AppColors.sublabel, fontSize: 12)),
                     Text(_usd(l.unitUsd * l.qty),
-                        style: const TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.w800)),
+                        style: const TextStyle(color: Color(0xFFFF6A00), fontWeight: FontWeight.w800)),
                   ])),
                   Column(children: [
                     Row(mainAxisSize: MainAxisSize.min, children: [
@@ -3426,7 +3427,7 @@ class _WalletScreenState extends State<WalletScreen> {
     'agent_credit': ('Recharge par ton agent', Icons.south_west_rounded, Color(0xFF12B76A)),
     'purchase': ('Achat boutique', Icons.shopping_bag_outlined, Color(0xFFF97066)),
     'refund': ('Remboursement', Icons.undo_rounded, Color(0xFF12B76A)),
-    'adjust': ('Correction', Icons.tune_rounded, Color(0xFF8B5CF6)),
+    'adjust': ('Correction', Icons.tune_rounded, Color(0xFFFF3D1F)),
   };
 
   @override
@@ -3510,7 +3511,7 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   Widget _historyRow(Map<String, dynamic> h) {
-    final k = _kinds[h['kind']] ?? ('Opération', Icons.swap_horiz_rounded, const Color(0xFF8B5CF6));
+    final k = _kinds[h['kind']] ?? ('Opération', Icons.swap_horiz_rounded, const Color(0xFFFF3D1F));
     final amt = (h['amountUsd'] as num).toDouble();
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -3554,9 +3555,9 @@ class _WalletScreenState extends State<WalletScreen> {
 
 // ── Mes commandes ────────────────────────────────────────────────────────
 const Map<String, (String, Color)> kOrderStatus = {
-  'payee': ('Payée — en préparation', Color(0xFF00D4FF)),
-  'achetee': ('Achetée chez le fournisseur', Color(0xFF8B5CF6)),
-  'entrepot': ('À l\'entrepôt en Chine', Color(0xFF8B5CF6)),
+  'payee': ('Payée — en préparation', Color(0xFFFF6A00)),
+  'achetee': ('Achetée chez le fournisseur', Color(0xFFFF3D1F)),
+  'entrepot': ('À l\'entrepôt en Chine', Color(0xFFFF3D1F)),
   'expediee': ('Expédiée vers l\'Algérie', Color(0xFFF79009)),
   'livree': ('Livrée', Color(0xFF12B76A)),
   'annulee': ('Annulée — remboursée', Color(0xFFF97066)),
